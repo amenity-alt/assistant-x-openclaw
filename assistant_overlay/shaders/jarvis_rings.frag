@@ -11,6 +11,7 @@ layout(location = 3) uniform float speakingScale;
 layout(location = 4) uniform vec3 primaryColor;
 layout(location = 5) uniform vec3 dimColor;
 layout(location = 6) uniform vec3 lightColor;
+layout(location = 7) uniform float lineWidthScale;
 
 const float PI = 3.141592653589793;
 const float TAU = 6.283185307179586;
@@ -69,97 +70,104 @@ void main() {
   float speak = clamp(speakingScale, 0.0, 1.0);
   float pulse = clamp(pulseValue, 0.0, 1.0);
 
+  // 线宽加粗时整体向内收缩，避免裁切。
+  float radiusScale = clamp((0.96 - 0.010 * lineWidthScale) / 0.95, 0.75, 1.0);
+
   vec3 color = vec3(0.0);
   float alpha = 0.0;
 
-  float outerRadius = 0.95 * (1.0 + speak * 0.02);
-  float outerGlow = ring(radius, outerRadius, 0.020 + speak * 0.010);
-  color = blendLight(color, primaryColor, outerGlow * (0.20 + pulse * 0.12 + speak * 0.40));
-  alpha = max(alpha, outerGlow * (0.18 + pulse * 0.12 + speak * 0.35));
+  // === 外壳金属环（双线 + 辉光），低亮度 HUD 感 ===
+  float outerR = .92 * radiusScale;
+  float shellGlow = ring(radius, outerR, (0.008 + speak * 0.00) * lineWidthScale);
+  color = blendLight(color, primaryColor, shellGlow * (0.14 + pulse * 0.36 + speak * 0.22));
+  alpha = max(alpha, shellGlow * (0.13 + pulse * 0.05 + speak * 0.20));
 
-  float outerBase = ring(radius, 0.95, 0.010);
-  color = blendLight(color, dimColor, outerBase * 0.45);
-  alpha = max(alpha, outerBase * 0.42);
+  float shellBase = ring(radius, 0.88 * radiusScale, 0.020 * lineWidthScale);
+  color = blendLight(color, dimColor, shellBase * 0.42);
+  alpha = max(alpha, shellBase * 0.20);
 
-  float minorTicks = radialLine(radius, angle, 60.0, outerRot, 0.925, 0.952, 0.0045);
-  color = blendLight(color, dimColor, minorTicks * 0.70);
-  alpha = max(alpha, minorTicks * 0.55);
+  // 外环刻度（细密 60 + 粗 12），克制
+  float minorTicks = radialLine(radius, angle, 60.0, outerRot, 0.85 * radiusScale, radiusScale, 0.005 * lineWidthScale);
+  color = blendLight(color, dimColor, minorTicks * 0.58);
+  alpha = max(alpha, minorTicks * 0.54);
 
-  float majorTicks = radialLine(radius, angle, 12.0, outerRot, 0.890, 0.955, 0.011);
-  color = blendLight(color, primaryColor, majorTicks * 1.05);
-  alpha = max(alpha, majorTicks * 0.86);
+  float majorTicks = radialLine(radius, angle, 12.0, outerRot, 0.82 * radiusScale, radiusScale, 0.008 * lineWidthScale);
+  color = blendLight(color, primaryColor, majorTicks * 0.40);
+  alpha = max(alpha, majorTicks * 0.32);
 
-  float arcs1 = ring(radius, 0.82, 0.013) * angularBand(angle, 8.0, arcsRot, 0.065);
-  float arcs2 = ring(radius, 0.75, 0.009) * angularBand(angle, 16.0, -arcsRot * 0.5, 0.045);
-  float arcs3 = ring(radius, 0.68, 0.0065) * angularBand(angle, 24.0, arcsRot * 0.3, 0.033);
-  color = blendLight(color, dimColor, arcs1 * 0.95);
-  color = blendLight(color, primaryColor, arcs2 * 1.00);
-  color = blendLight(color, lightColor, arcs3 * 0.78);
-  alpha = max(alpha, arcs1 * 0.60);
-  alpha = max(alpha, arcs2 * 0.78);
-  alpha = max(alpha, arcs3 * 0.70);
+  // === 线圈层（反应堆标志性环形线圈段）===
+  // 8 段主线圈，缓慢旋转
+  float coil1 = ring(radius, 0.74 * radiusScale, 0.012 * lineWidthScale) * angularBand(angle, 8.0, arcsRot, 0.085);
+  // 16 段细线圈，反向慢转
+  float coil2 = ring(radius, 0.68 * radiusScale, 0.007 * lineWidthScale) * angularBand(angle, 16.0, -arcsRot * 0.5, 0.05);
+  color = blendLight(color, dimColor, coil1 * 0.34);
+  color = blendLight(color, primaryColor, coil2 * 0.30);
+  alpha = max(alpha, coil1 * 0.26);
+  alpha = max(alpha, coil2 * 0.24);
 
-  float dataBase = ring(radius, 0.55, 0.0065);
-  float dataTicks = radialLine(radius, angle, 36.0, dataRot, 0.510, 0.555, 0.007);
-  color = blendLight(color, primaryColor, dataBase * 0.70 + dataTicks * 0.90);
-  alpha = max(alpha, dataBase * 0.58);
-  alpha = max(alpha, dataTicks * 0.75);
+  // === 中部数据环（低亮度脉动）===
+  float dataBase = ring(radius, 0.56 * radiusScale, 0.006 * lineWidthScale);
+  float dataTicks = radialLine(radius, angle, 36.0, dataRot, 0.52 * radiusScale, 0.565 * radiusScale, 0.005 * lineWidthScale);
+  color = blendLight(color, primaryColor, dataBase * 0.26 + dataTicks * 0.30);
+  alpha = max(alpha, dataBase * 0.22);
+  alpha = max(alpha, dataTicks * 0.24);
 
+  // 数据环上的发光节点（12 个），亮度随旋转呼吸
   for (int i = 0; i < 12; i++) {
     float fi = float(i);
     float bright = (sin(dataRot * 3.0 + fi) + 1.0) * 0.5;
-    float dotMask = dotOnRing(uv, fi / 12.0 * TAU + dataRot, 0.505, 0.014 + bright * 0.006);
-    color = blendLight(color, primaryColor, dotMask * (0.45 + bright * 0.55));
-    alpha = max(alpha, dotMask * (0.42 + bright * 0.42));
+    float dotMask = dotOnRing(uv, fi / 12.0 * TAU + dataRot, 0.515 * radiusScale, (0.010 + bright * 0.004) * lineWidthScale);
+    color = blendLight(color, primaryColor, dotMask * (0.18 + bright * 0.22));
+    alpha = max(alpha, dotMask * (0.16 + bright * 0.18));
   }
 
-  float pulseRing = ring(radius, 0.55 * (1.02 + pulse * 0.02 + speak * 0.05), 0.010 + speak * 0.010);
-  color = blendLight(color, primaryColor, pulseRing * (0.36 + pulse * 0.18 + speak * 0.44));
-  alpha = max(alpha, pulseRing * (0.25 + pulse * 0.16 + speak * 0.45));
+  // 脉动环（跟随 pulse/speak 微扩）
+  float pulseRing = ring(radius, 0.56 * radiusScale * (1.02 + pulse * 0.02 + speak * 0.04), (0.008 + speak * 0.008) * lineWidthScale);
+  color = blendLight(color, primaryColor, pulseRing * (0.16 + pulse * 0.08 + speak * 0.24));
+  alpha = max(alpha, pulseRing * (0.12 + pulse * 0.06 + speak * 0.22));
 
-  float innerBase = ring(radius, 0.38, 0.009);
-  float innerFine = ring(radius, 0.323, 0.0045);
-  color = blendLight(color, primaryColor, innerBase * 0.98 + innerFine * 0.70);
-  alpha = max(alpha, innerBase * 0.78);
-  alpha = max(alpha, innerFine * 0.62);
+  // === 内环（双线，低亮度）===
+  float innerBase = ring(radius, 0.40 * radiusScale, 0.008 * lineWidthScale);
+  float innerFine = ring(radius, 0.34 * radiusScale, 0.004 * lineWidthScale);
+  color = blendLight(color, primaryColor, innerBase * 0.40 + innerFine * 0.26);
+  alpha = max(alpha, innerBase * 0.30);
+  alpha = max(alpha, innerFine * 0.22);
 
+  // 内环装饰条带（8 段径向，非常克制）
   for (int i = 0; i < 8; i++) {
     float center = float(i) / 8.0 * TAU + innerRot;
-    float chevron = sector(angle, center, 0.020)
-      * smoothstep(0.240, 0.315, radius)
-      * smoothstep(0.345, 0.320, radius);
-    chevron += sector(angle, center + 0.035, 0.012)
-      * smoothstep(0.250, 0.315, radius)
-      * smoothstep(0.345, 0.320, radius) * 0.6;
-    chevron += sector(angle, center - 0.035, 0.012)
-      * smoothstep(0.250, 0.315, radius)
-      * smoothstep(0.345, 0.320, radius) * 0.6;
-    color = blendLight(color, lightColor, chevron * 0.90);
-    alpha = max(alpha, chevron * 0.72);
+    float chevron = sector(angle, center, 0.020 * lineWidthScale)
+      * smoothstep(0.245 * radiusScale, 0.315 * radiusScale, radius)
+      * smoothstep(0.345 * radiusScale, 0.320 * radiusScale, radius);
+    color = blendLight(color, primaryColor, chevron * 0.18);
+    alpha = max(alpha, chevron * 0.16);
   }
 
+  // 内环节点（4 个）
   for (int i = 0; i < 4; i++) {
-    float dotMask = dotOnRing(uv, float(i) / 4.0 * TAU + innerRot * 0.5, 0.437, 0.017);
-    color = blendLight(color, primaryColor, dotMask * 0.90);
-    alpha = max(alpha, dotMask * 0.72);
+    float dotMask = dotOnRing(uv, float(i) / 4.0 * TAU + innerRot * 0.5, 0.45 * radiusScale, 0.012 * lineWidthScale);
+    color = blendLight(color, primaryColor, dotMask * 0.30);
+    alpha = max(alpha, dotMask * 0.24);
   }
 
-  float coreGlow = 1.0 - smoothstep(0.070 + speak * 0.010, 0.270 + speak * 0.080, radius);
-  float coreFill = 1.0 - smoothstep(0.150, 0.153 + aa(), radius);
-  float coreRing = ring(radius, 0.150, 0.008);
-  float innerCore = 1.0 - smoothstep(0.072, 0.078 + aa(), radius);
-  color = blendLight(color, primaryColor, coreGlow * (0.08 + pulse * 0.05 + speak * 0.18));
-  color = mix(color, color + primaryColor * 0.18, coreFill * 0.35);
-  color = blendLight(color, primaryColor, coreRing * 1.05);
-  color = blendLight(color, lightColor, innerCore * 0.85);
-  alpha = max(alpha, coreGlow * (0.10 + pulse * 0.05 + speak * 0.18));
-  alpha = max(alpha, coreFill * 0.24);
-  alpha = max(alpha, coreRing * 0.78);
-  alpha = max(alpha, innerCore * 0.74);
+  // === 中心反应堆核心（柔和发光，不刺眼）===
+  float coreGlow = 1.0 - smoothstep((0.06 + speak * 0.008) * radiusScale, (0.22 + speak * 0.06) * radiusScale, radius);
+  float coreFill = 1.0 - smoothstep(0.12 * radiusScale, 0.123 * radiusScale + aa(), radius);
+  float coreRing = ring(radius, 0.12 * radiusScale, 0.006 * lineWidthScale);
+  float innerCore = 1.0 - smoothstep(0.06 * radiusScale, 0.064 * radiusScale + aa(), radius);
+  color = blendLight(color, primaryColor, coreGlow * (0.05 + pulse * 0.03 + speak * 0.12));
+  color = mix(color, color + primaryColor * 0.10, coreFill * 0.22);
+  color = blendLight(color, primaryColor, coreRing * 0.42);
+  color = blendLight(color, lightColor, innerCore * 0.30);
+  alpha = max(alpha, coreGlow * (0.07 + pulse * 0.03 + speak * 0.12));
+  alpha = max(alpha, coreFill * 0.16);
+  alpha = max(alpha, coreRing * 0.34);
+  alpha = max(alpha, innerCore * 0.28);
 
+  // 扫描微光（极弱）
   float scan = pow(max(0.0, sin(angle * 18.0 + radius * 30.0 + dataRot * 2.0)), 24.0);
-  color = blendLight(color, primaryColor, scan * ring(radius, 0.60, 0.28) * 0.05);
+  color = blendLight(color, primaryColor, scan * ring(radius, 0.60 * radiusScale, 0.28) * 0.03);
 
-  alpha = clamp(alpha, 0.0, 0.96);
+  alpha = clamp(alpha, 0.0, 0.92);
   fragColor = vec4(color, alpha);
 }

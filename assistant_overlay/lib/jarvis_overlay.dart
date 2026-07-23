@@ -3,7 +3,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:assistant_overlay/jarvis_rings_windows.dart';
 import 'package:flutter/services.dart';
 import 'package:system_info2/system_info2.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -13,6 +12,8 @@ import 'agent_visual.dart';
 import 'hud_terminal_shell.dart';
 import 'overlay/jarvis/widgets/gravitational_light_orb.dart';
 import 'overlay/jarvis/widgets/iron_man_model_view.dart';
+import 'overlay/jarvis/widgets/jarvis_rings_shader.dart';
+import 'overlay/jarvis/jarvis_color.dart';
 
 class JarvisRingsPainter extends CustomPainter {
   final double outerRingRotation;
@@ -33,38 +34,11 @@ class JarvisRingsPainter extends CustomPainter {
     this.speakingScale = 0.0,
   });
 
-  Color get primaryColor {
-    switch (currentEffect) {
-      case 'success':
-        return const Color(0xFF00FF66);
-      case 'error':
-        return const Color(0xFFFF4444);
-      default:
-        return const Color(0xFF12B9FF);
-    }
-  }
+  Color get primaryColor => JarvisColor.forEffect(currentEffect).primary;
 
-  Color get primaryColorDim {
-    switch (currentEffect) {
-      case 'success':
-        return const Color(0x8800FF66);
-      case 'error':
-        return const Color(0x88FF4444);
-      default:
-        return const Color(0xFF12B9FF);
-    }
-  }
+  Color get primaryColorDim => JarvisColor.forEffect(currentEffect).dim;
 
-  Color get primaryColorLight {
-    switch (currentEffect) {
-      case 'success':
-        return const Color(0xFFAAFFBB);
-      case 'error':
-        return const Color(0xFFFF8888);
-      default:
-        return const Color(0xFFFFFFFF);
-    }
-  }
+  Color get primaryColorLight => JarvisColor.forEffect(currentEffect).light;
 
   double get opacity {
     if (currentEffect == 'hide' || currentEffect == 'idle') {
@@ -361,7 +335,7 @@ class JarvisRingsPainter extends CustomPainter {
       text: TextSpan(
         text: "J.A.R.V.I.S.",
         style: TextStyle(
-          color: Colors.white,
+          color: JarvisColor.ColortextColor,
           fontSize: 16,
           fontWeight: FontWeight.bold,
           letterSpacing: 2,
@@ -850,6 +824,7 @@ class JarvisAgentVisual implements AgentVisual {
                   child: AnimatedBuilder(
                     animation: _pulseController,
                     builder: (context, child) {
+                      final palette = JarvisColor.forEffect(_currentEffect);
                       return SizedBox(
                         width: size,
                         height: size,
@@ -859,11 +834,11 @@ class JarvisAgentVisual implements AgentVisual {
                         //   fps: 30,
                         // ),
                         child: _visualEffect == 'Gravitational'
-                            ? const GravitationalLightOrb(
-                                coreColor: Color(0xFFBFE7FF),
-                                glowColor: Color(0xFF0D67BC),
-                                accentColor: Color(0xFF8CC1FA),
-                                mistColor: Color(0xFF0A4F91),
+                            ? GravitationalLightOrb(
+                                coreColor: palette.orbCore,
+                                glowColor: palette.orbGlow,
+                                accentColor: palette.orbAccent,
+                                mistColor: palette.orbMist,
                                 orbScale: 1.2,
                               )
                             : JarvisSequencePlayer(
@@ -898,7 +873,9 @@ class JarvisAgentVisual implements AgentVisual {
             child: Text(
               msg,
               style: TextStyle(
-                color: current ? Colors.white : Colors.white70,
+                color: current
+                    ? JarvisColor.ColortextColor
+                    : JarvisColor.ColortextColor.withAlpha(179),
                 fontSize: 14,
                 height: 1.35,
                 fontWeight: current ? FontWeight.w500 : FontWeight.w400,
@@ -911,7 +888,9 @@ class JarvisAgentVisual implements AgentVisual {
             child: Text(
               time,
               style: TextStyle(
-                color: Color(0xFF8CC1FA).withAlpha(150),
+                color: JarvisColor.forEffect(_currentEffect)
+                    .orbAccent
+                    .withAlpha(150),
                 fontSize: 11,
               ),
             ),
@@ -942,12 +921,12 @@ class JarvisAgentVisual implements AgentVisual {
       items.add(_terminalRow(currentText, _hm(), current: true));
     } else if (items.isEmpty) {
       items.add(
-        const Padding(
-          padding: EdgeInsets.only(top: 2),
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
           child: Text(
             '...',
             style: TextStyle(
-              color: Colors.white38,
+              color: JarvisColor.ColortextColor.withAlpha(97),
               fontSize: 14,
               fontStyle: FontStyle.italic,
             ),
@@ -995,50 +974,18 @@ class JarvisAgentVisual implements AgentVisual {
                     return SizedBox(
                       width: _jarvisRingSize,
                       height: _jarvisRingSize,
-                      child: CustomPaint(
-                        painter: Platform.isWindows
-                            ? JarvisRingsPainterWindows(
-                                outerRingRotation:
-                                    (_outerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                arcsRotation:
-                                    (_arcsAngle * 2 * math.pi) % (2 * math.pi),
-                                dataRingRotation:
-                                    (_dataRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                innerRingRotation:
-                                    (_innerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                pulseValue: _pulseController.value,
-                                currentEffect: _currentEffect,
-                                speakingScale:
-                                    (_ringScaleController.value - 1.0).clamp(
-                                      0.0,
-                                      0.1,
-                                    ) *
-                                    10,
-                              )
-                            : JarvisRingsPainter(
-                                outerRingRotation:
-                                    (_outerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                arcsRotation:
-                                    (_arcsAngle * 2 * math.pi) % (2 * math.pi),
-                                dataRingRotation:
-                                    (_dataRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                innerRingRotation:
-                                    (_innerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                pulseValue: _pulseController.value,
-                                currentEffect: _currentEffect,
-                                speakingScale:
-                                    (_ringScaleController.value - 1.0).clamp(
-                                      0.0,
-                                      0.1,
-                                    ) *
-                                    10,
-                              ),
+                      child: JarvisRingsShader(
+                        outerRingRotation:
+                            (_outerRingAngle * 2 * math.pi) % (2 * math.pi),
+                        arcsRotation:
+                            (_arcsAngle * 2 * math.pi) % (2 * math.pi),
+                        dataRingRotation:
+                            (_dataRingAngle * 2 * math.pi) % (2 * math.pi),
+                        innerRingRotation:
+                            (_innerRingAngle * 2 * math.pi) % (2 * math.pi),
+                        pulseValue: _pulseController.value,
+                        currentEffect: _currentEffect,
+                        lineWidthScale: 5,
                       ),
                     );
                   },
@@ -1094,6 +1041,8 @@ class JarvisAgentVisual implements AgentVisual {
                     return AnimatedBuilder(
                       animation: _pulseController,
                       builder: (context, child) {
+                        final palette =
+                            JarvisColor.forEffect(_currentEffect);
                         return SizedBox(
                           width: terminalHeight / 3 * 2,
                           height: terminalHeight / 3 * 2,
@@ -1101,14 +1050,14 @@ class JarvisAgentVisual implements AgentVisual {
                             child: IronManModelView(
                               style: IronManModelStyle(
                                 palette: [
-                                  Color(0xFF0D67BC),
-                                  Color(0xFF8CC1FA),
-                                  Color(0xFFBFE7FF),
-                                  Color(0xFF6EB9FF),
-                                  Color(0xFF0A4F91),
+                                  palette.orbGlow,
+                                  palette.orbAccent,
+                                  palette.orbCore,
+                                  palette.orbHighlight,
+                                  palette.orbMist,
                                 ],
                                 opacity: 0.62,
-                                glowColor: Color(0xFF79D9FF),
+                                glowColor: palette.modelGlow,
                                 glowIntensity: 0.24,
                                 glowScale: 1.045,
                                 spinSpeed: 0.628,
@@ -1295,9 +1244,6 @@ class _SystemStatusPanel extends StatefulWidget {
 }
 
 class _SystemStatusPanelState extends State<_SystemStatusPanel> {
-  static const Color _cyan = Color(0xFF66FFFF);
-  static const Color _light = Color(0xFF8CF6FF);
-
   final Battery _battery = Battery();
   final NetworkInfo _netInfo = NetworkInfo();
   final Connectivity _conn = Connectivity();
@@ -1605,7 +1551,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
         SizedBox(
           width: 32,
           height: 32,
-          child: CustomPaint(painter: _GaugeRingPainter(m.pct / 100, _cyan)),
+          child: CustomPaint(painter: _GaugeRingPainter(m.pct / 100, JarvisColor.ColorstatusAccent)),
         ),
         const SizedBox(width: 11),
         Expanded(
@@ -1616,7 +1562,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
               Text(
                 label,
                 style: const TextStyle(
-                  color: _light,
+                  color: JarvisColor.ColorstatusLabel,
                   fontSize: 10.5,
                   letterSpacing: 1.2,
                   fontWeight: FontWeight.w500,
@@ -1625,7 +1571,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
               Text(
                 '${m.pct.round()}%${m.suffix}',
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: JarvisColor.ColortextColor,
                   fontSize: 15,
                   fontWeight: FontWeight.w500,
                 ),
@@ -1635,7 +1581,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
                   m.detail,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: _cyan.withAlpha(160), fontSize: 10),
+                  style: TextStyle(color: JarvisColor.ColorstatusAccent.withAlpha(160), fontSize: 10),
                 ),
             ],
           ),
@@ -1644,7 +1590,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
         SizedBox(
           width: 42,
           height: 30,
-          child: CustomPaint(painter: _SparklinePainter(m.hist, _cyan)),
+          child: CustomPaint(painter: _SparklinePainter(m.hist, JarvisColor.ColorstatusAccent)),
         ),
       ],
     );
@@ -1657,7 +1603,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
         SizedBox(
           width: 32,
           height: 32,
-          child: Icon(n.icon, size: 22, color: _cyan),
+          child: Icon(n.icon, size: 22, color: JarvisColor.ColorstatusAccent),
         ),
         const SizedBox(width: 11),
         Expanded(
@@ -1668,7 +1614,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
               const Text(
                 'NETWORK',
                 style: TextStyle(
-                  color: _light,
+                  color: JarvisColor.ColorstatusLabel,
                   fontSize: 10.5,
                   letterSpacing: 1.2,
                   fontWeight: FontWeight.w500,
@@ -1679,7 +1625,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: JarvisColor.ColortextColor,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                 ),
@@ -1688,7 +1634,7 @@ class _SystemStatusPanelState extends State<_SystemStatusPanel> {
                 sub,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: _cyan.withAlpha(160), fontSize: 10),
+                style: TextStyle(color: JarvisColor.ColorstatusAccent.withAlpha(160), fontSize: 10),
               ),
             ],
           ),

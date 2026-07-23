@@ -83,8 +83,8 @@ class LinMeimeiPet implements AgentVisual {
   late AnimationController _leftTerminalSlideController;
   late AnimationController _rightTerminalSlideController;
 
-  static const Color _themeColor = Color(0xFFFFB6C1);
-  static const Color _terminalBackground = Color(0xFFFFE4E1);
+  Color _themeColor = Color(0xFFFFB6C1);
+  Color _terminalBackground = Color(0xFFFFE4E1);
 
   LinMeimeiPet({required this.vsync, required this.onModelReady}) {
     _userScrollController = ScrollController();

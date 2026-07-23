@@ -441,8 +441,8 @@ class JarvisAgentVisual implements AgentVisual {
   late AnimationController _leftTerminalSlideController;
   late AnimationController _rightTerminalSlideController;
 
-  static const Color _jarvisBlue = Color(0xFF66FFFF);
-  static const Color _terminalBackground = Color(0xCC0A1628);
+   _jarvisBlue = Color(0xFF66FFFF);
+   _terminalBackground = Color(0xCC0A1628);
 
   void _initAnimationControllers() {
     _outerRingController = AnimationController(

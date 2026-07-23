@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'agent_visual.dart';
+import 'overlay/linmeimei/linmeimei_color.dart';
 
 class OrbRenderer extends StatefulWidget {
   final double time;
@@ -82,8 +83,9 @@ class LinMeimeiPet implements AgentVisual {
   late AnimationController _leftTerminalSlideController;
   late AnimationController _rightTerminalSlideController;
 
-  static const Color _themeColor = Color(0xFFFFB6C1);
-  static const Color _terminalBackground = Color(0xFFFFE4E1);
+  //  _themeColor = LinmeimeiColor.defaults.themeColor;
+  //  _terminalBackground =
+  //     LinmeimeiColor.defaults.terminalBackground;
 
   LinMeimeiPet({required this.vsync, required this.onModelReady}) {
     _userScrollController = ScrollController();
@@ -369,9 +371,9 @@ class LinMeimeiPet implements AgentVisual {
       width: 350,
       constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: BoxDecoration(
-        color: _terminalBackground.withAlpha(100),
+        color: LinmeimeiColor.defaults.terminalBackground.withAlpha(100),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: _themeColor.withAlpha(150), width: 0),
+        border: Border.all(color: LinmeimeiColor.defaults.themeColor.withAlpha(150), width: 0),
       ),
       padding: const EdgeInsets.all(12),
       child: ListView(

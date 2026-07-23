@@ -206,11 +206,11 @@ models/jarvis-v2-melotts-onnx/
 "components": {
     "feedback": "jarvis",
     "visual": "jarvis",
-    "tts": "jarvis_v2_onnx"
+    "tts": "jarvis_v2_onnx_lang_sch"
 }
 ```
 
-对应参数在 `assistants.json` 的 `tts_configs.jarvis_v2_onnx` 中：`speed`、
+对应参数在 `assistants.json` 的 `tts_configs.jarvis_v2_onnx_lang_sch` 中：`speed`、
 `sample_rate`、`sdp_ratio`、`noise_scale`、`noise_scale_w` 和 `num_threads`。
 该后端会在初始化后于后台预载多语 BERT、ONNX 会话并完成一次预热推理；
 主程序只为它启用一个外层合成 worker，避免与 ONNX 内部线程池重复并发抢占 CPU。

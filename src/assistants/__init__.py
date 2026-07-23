@@ -193,7 +193,7 @@ class AssistantInstance:
 
             return MacosSayTTS(self._tts_config(spec))
 
-        if spec == "jarvis_v2_onnx":
+        if spec == "jarvis_v2_onnx_lang_sch" or spec.startswith("jarvis_v2_onnx_lang_sch_"):
             from assistants.jarvis.tts import JarvisV2OnnxTTS
 
             return JarvisV2OnnxTTS(self._tts_config(spec))

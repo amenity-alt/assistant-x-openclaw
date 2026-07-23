@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../jarvis_color.dart';
+
 class JarvisRingsShader extends StatefulWidget {
   const JarvisRingsShader({
     super.key,
@@ -14,6 +16,8 @@ class JarvisRingsShader extends StatefulWidget {
     required this.currentEffect,
     this.speakingScale = 0,
     this.showLabel = true,
+    this.palette,
+    this.lineWidthScale,
   });
 
   final double outerRingRotation;
@@ -24,6 +28,14 @@ class JarvisRingsShader extends StatefulWidget {
   final String currentEffect;
   final double speakingScale;
   final bool showLabel;
+
+  /// 整体配色（含圆环三色、线条粗细），为 null 时按 [currentEffect]
+  /// 使用 [JarvisColor.forEffect] 的内置配色，与光球等同源。
+  final JarvisColor? palette;
+
+  /// 圆环线条粗细缩放系数，1.0 为原始粗细。
+  /// 为 null 时回退到 [JarvisColor.ringLineWidthScale]（默认 2.0，翻倍）。
+  final double? lineWidthScale;
 
   @override
   State<JarvisRingsShader> createState() => _JarvisRingsShaderState();
@@ -58,7 +70,10 @@ class _JarvisRingsShaderState extends State<JarvisRingsShader> {
       return const SizedBox.expand();
     }
 
-    final colors = _JarvisRingColors.forEffect(widget.currentEffect);
+    final palette =
+        widget.palette ?? JarvisColor.forEffect(widget.currentEffect);
+    final lineWidthScale =
+        widget.lineWidthScale ?? 1.0;
     return RepaintBoundary(
       child: Stack(
         fit: StackFit.expand,
@@ -72,9 +87,10 @@ class _JarvisRingsShaderState extends State<JarvisRingsShader> {
               innerRingRotation: widget.innerRingRotation,
               pulseValue: widget.pulseValue,
               speakingScale: widget.speakingScale,
-              primaryColor: colors.primary,
-              dimColor: colors.dim,
-              lightColor: colors.light,
+              lineWidthScale: lineWidthScale,
+              primaryColor: palette.primary,
+              dimColor: palette.dim,
+              lightColor: palette.light,
             ),
           ),
           if (widget.showLabel)
@@ -83,14 +99,14 @@ class _JarvisRingsShaderState extends State<JarvisRingsShader> {
                 'J.A.R.V.I.S.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: Colors.white,
+                  color: palette.labelColor,
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                   letterSpacing: 2,
                   shadows: [
-                    Shadow(color: colors.primary, blurRadius: 10),
+                    Shadow(color: palette.primary, blurRadius: 10),
                     Shadow(
-                      color: colors.primary.withAlpha(150),
+                      color: palette.primary.withAlpha(150),
                       blurRadius: 20,
                     ),
                   ],
@@ -108,41 +124,6 @@ class _JarvisRingsShaderState extends State<JarvisRingsShader> {
   }
 }
 
-class _JarvisRingColors {
-  const _JarvisRingColors({
-    required this.primary,
-    required this.dim,
-    required this.light,
-  });
-
-  final Color primary;
-  final Color dim;
-  final Color light;
-
-  static _JarvisRingColors forEffect(String currentEffect) {
-    switch (currentEffect) {
-      case 'success':
-        return const _JarvisRingColors(
-          primary: Color(0xFF00FF66),
-          dim: Color(0x8800FF66),
-          light: Color(0xFFAAFFBB),
-        );
-      case 'error':
-        return const _JarvisRingColors(
-          primary: Color(0xFFFF4444),
-          dim: Color(0x88FF4444),
-          light: Color(0xFFFF8888),
-        );
-      default:
-        return const _JarvisRingColors(
-          primary: Color(0xFF12B9FF),
-          dim: Color(0xFF12B9FF),
-          light: Color(0xFFFFFFFF),
-        );
-    }
-  }
-}
-
 class _JarvisRingsShaderPainter extends CustomPainter {
   const _JarvisRingsShaderPainter({
     required this.program,
@@ -152,6 +133,7 @@ class _JarvisRingsShaderPainter extends CustomPainter {
     required this.innerRingRotation,
     required this.pulseValue,
     required this.speakingScale,
+    required this.lineWidthScale,
     required this.primaryColor,
     required this.dimColor,
     required this.lightColor,
@@ -164,19 +146,16 @@ class _JarvisRingsShaderPainter extends CustomPainter {
   final double innerRingRotation;
   final double pulseValue;
   final double speakingScale;
+  final double lineWidthScale;
   final Color primaryColor;
   final Color dimColor;
   final Color lightColor;
 
-  static double _channel(Color color, int shift) {
-    return ((color.toARGB32() >> shift) & 0xff) / 255;
-  }
-
   static void _setColor(ui.FragmentShader shader, int index, Color color) {
     shader
-      ..setFloat(index, _channel(color, 16))
-      ..setFloat(index + 1, _channel(color, 8))
-      ..setFloat(index + 2, _channel(color, 0));
+      ..setFloat(index, color.r)
+      ..setFloat(index + 1, color.g)
+      ..setFloat(index + 2, color.b);
   }
 
   @override
@@ -194,6 +173,7 @@ class _JarvisRingsShaderPainter extends CustomPainter {
     _setColor(shader, 8, primaryColor);
     _setColor(shader, 11, dimColor);
     _setColor(shader, 14, lightColor);
+    shader.setFloat(17, lineWidthScale);
 
     canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
   }
@@ -207,6 +187,7 @@ class _JarvisRingsShaderPainter extends CustomPainter {
         oldDelegate.innerRingRotation != innerRingRotation ||
         oldDelegate.pulseValue != pulseValue ||
         oldDelegate.speakingScale != speakingScale ||
+        oldDelegate.lineWidthScale != lineWidthScale ||
         oldDelegate.primaryColor != primaryColor ||
         oldDelegate.dimColor != dimColor ||
         oldDelegate.lightColor != lightColor;

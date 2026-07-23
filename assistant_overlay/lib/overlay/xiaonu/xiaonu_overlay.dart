@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 
 import '../core/agent_visual.dart';
+import 'xiaonu_color.dart';
 
 /// 小奴特效 —— 一只会动的猫（GIF 状态机）
 ///
@@ -65,8 +66,8 @@ class Xiaonupet implements AgentVisual {
   late AnimationController _rightTerminalSlideController;
 
   // 主题色（贴合黑白猫：暖奶白底 + 炭灰描边）
-  static const Color _themeColor = Color(0xFF3A3A3A);
-  static const Color _terminalBackground = Color(0xFFFFF6E9);
+  //  _themeColor = XiaonuColor.defaults.themeColor;
+  //  _terminalBackground = XiaonuColor.defaults.terminalBackground;
 
   void _initAnimationControllers() {
     _opacityController = AnimationController(
@@ -412,9 +413,9 @@ class Xiaonupet implements AgentVisual {
       width: 350,
       constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: BoxDecoration(
-        color: _terminalBackground.withAlpha(220),
+        color: XiaonuColor.defaults.terminalBackground.withAlpha(220),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: _themeColor.withAlpha(40), width: 1),
+        border: Border.all(color: XiaonuColor.defaults.themeColor.withAlpha(40), width: 1),
       ),
       padding: const EdgeInsets.all(12),
       child: ListView(
