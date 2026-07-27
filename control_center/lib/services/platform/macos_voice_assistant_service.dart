@@ -30,6 +30,10 @@ class MacOSVoiceAssistantService implements VoiceAssistantServiceBase {
     _processExited = false;
     _startCompleter = Completer<void>();
 
+    if (_pythonProcess != null) {
+      _pythonProcess!.kill();
+      _pythonProcess = null;
+    }
     await cleanupOldProcesses();
 
     if (!_shouldKeepRunning) {
@@ -134,7 +138,7 @@ class MacOSVoiceAssistantService implements VoiceAssistantServiceBase {
   }
 
   Future<void> cleanupOldProcesses() async {
-    final ports = [17888, 17889];
+    final ports = [17888, 17889, 18790];
     for (final port in ports) {
       try {
         final result = await Process.run('lsof', ['-ti', ':$port']);

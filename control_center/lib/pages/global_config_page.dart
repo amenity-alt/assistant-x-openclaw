@@ -12,6 +12,7 @@ class GlobalConfigPage extends StatefulWidget {
 class _GlobalConfigPageState extends State<GlobalConfigPage> {
   final _service = ConfigService();
   GlobalConfig? _config;
+  GlobalConfig? _savedConfig;
   bool _loading = true;
   bool _saving = false;
   String? _error;
@@ -32,6 +33,7 @@ class _GlobalConfigPageState extends State<GlobalConfigPage> {
       if (!mounted) return;
       setState(() {
         _config = config;
+        _savedConfig = config;
         _loading = false;
       });
     } catch (e) {
@@ -50,6 +52,7 @@ class _GlobalConfigPageState extends State<GlobalConfigPage> {
     try {
       await _service.save(config);
       if (!mounted) return;
+      setState(() => _savedConfig = config);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('配置已写入 .env 与 assistants.json，重启语音助手后生效')),
       );
@@ -67,35 +70,82 @@ class _GlobalConfigPageState extends State<GlobalConfigPage> {
     setState(() => _config = config);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('全局配置'),
+  bool get _hasUnsavedChanges =>
+      _config != null && _savedConfig != null && _config != _savedConfig;
+
+  Future<bool> _confirmLeave() async {
+    if (!_hasUnsavedChanges) return true;
+    final action = await showDialog<_LeaveAction>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('保存更改？'),
+        content: const Text('当前配置有未保存的更改，离开前是否保存？'),
         actions: [
-          IconButton(
-            tooltip: '重新读取',
-            onPressed: _loading || _saving ? null : _load,
-            icon: const Icon(Icons.refresh),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, _LeaveAction.cancel),
+            child: const Text('取消'),
           ),
-          const SizedBox(width: 4),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, _LeaveAction.discard),
+            child: const Text('不保存'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, _LeaveAction.save),
+            child: const Text('保存'),
+          ),
         ],
       ),
-      bottomNavigationBar: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-        child: FilledButton.icon(
-          onPressed: _loading || _saving || _config == null ? null : _save,
-          icon: _saving
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.save_outlined),
-          label: Text(_saving ? '保存中' : '保存配置'),
+    );
+    if (action == _LeaveAction.save) {
+      await _save();
+      return !_hasUnsavedChanges;
+    }
+    return action == _LeaveAction.discard;
+  }
+
+  Future<void> _guardedReload() async {
+    if (await _confirmLeave()) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !_hasUnsavedChanges,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final navigator = Navigator.of(context);
+        final shouldLeave = await _confirmLeave();
+        if (!mounted || !shouldLeave) return;
+        navigator.pop();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('全局配置'),
+          actions: [
+            IconButton(
+              tooltip: '重新读取',
+              onPressed: _loading || _saving ? null : _guardedReload,
+              icon: const Icon(Icons.refresh),
+            ),
+            const SizedBox(width: 4),
+          ],
         ),
+        bottomNavigationBar: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+          child: FilledButton.icon(
+            onPressed: _loading || _saving || _config == null ? null : _save,
+            icon: _saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save_outlined),
+            label: Text(_saving ? '保存中' : '保存配置'),
+          ),
+        ),
+        body: _buildBody(),
       ),
-      body: _buildBody(),
     );
   }
 
@@ -383,3 +433,5 @@ class _GlobalConfigPageState extends State<GlobalConfigPage> {
     );
   }
 }
+
+enum _LeaveAction { cancel, discard, save }

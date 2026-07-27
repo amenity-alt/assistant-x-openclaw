@@ -620,6 +620,7 @@ class _ModelEditorDialogState extends State<_ModelEditorDialog> {
   bool _obscureKey = true;
   ProbeResult? _probe;
   String? _formError;
+  String _initialSignature = '';
 
   bool get _isClone => widget.clone && widget.entry != null;
   bool get _isEdit => widget.entry != null && !_isClone;
@@ -637,6 +638,10 @@ class _ModelEditorDialogState extends State<_ModelEditorDialog> {
     _baseUrl = TextEditingController(text: e?.baseUrl ?? '');
     _model = TextEditingController(text: e?.model ?? '');
     _apiKey = TextEditingController();
+    _initialSignature = _formSignature();
+    for (final controller in [_label, _provider, _baseUrl, _model, _apiKey]) {
+      controller.addListener(_onFormChanged);
+    }
   }
 
   @override
@@ -647,6 +652,52 @@ class _ModelEditorDialogState extends State<_ModelEditorDialog> {
     _model.dispose();
     _apiKey.dispose();
     super.dispose();
+  }
+
+  void _onFormChanged() {
+    if (mounted) setState(() {});
+  }
+
+  String _formSignature() => [
+    _label.text.trim(),
+    _provider.text.trim(),
+    _baseUrl.text.trim(),
+    _model.text.trim(),
+    _apiKey.text.trim(),
+  ].join('\u0001');
+
+  bool get _hasUnsavedChanges => _formSignature() != _initialSignature;
+
+  Future<bool> _confirmDiscard() async {
+    if (!_hasUnsavedChanges) return true;
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('放弃更改？'),
+        content: const Text('模型配置有未保存的更改，确定不保存并关闭吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('继续编辑'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.danger.withValues(alpha: 0.16),
+              foregroundColor: AppColors.danger,
+            ),
+            child: const Text('不保存'),
+          ),
+        ],
+      ),
+    );
+    return discard == true;
+  }
+
+  Future<void> _cancel() async {
+    if (await _confirmDiscard() && mounted) {
+      Navigator.pop(context, false);
+    }
   }
 
   String? _validateForm() {
@@ -740,80 +791,92 @@ class _ModelEditorDialogState extends State<_ModelEditorDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Row(
-        children: [
-          Icon(
-            _isClone
-                ? Icons.copy_all_outlined
-                : (_isEdit ? Icons.edit_outlined : Icons.add),
-            size: 18,
+    return PopScope(
+      canPop: !_hasUnsavedChanges,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        await _cancel();
+      },
+      child: AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              _isClone
+                  ? Icons.copy_all_outlined
+                  : (_isEdit ? Icons.edit_outlined : Icons.add),
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            Text(_isClone ? '克隆模型' : (_isEdit ? '编辑模型' : '添加模型')),
+          ],
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(
+            minWidth: 640,
+            maxWidth: MediaQuery.sizeOf(context).width * 0.72,
           ),
-          const SizedBox(width: 8),
-          Text(_isClone ? '克隆模型' : (_isEdit ? '编辑模型' : '添加模型')),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _presetGrid(),
+                const SizedBox(height: 8),
+                _field(_label, '显示名称', hint: '如 DeepSeek Chat（留空用 model）'),
+                _field(
+                  _provider,
+                  'Provider',
+                  hint: '展示用标签，如 deepseek',
+                  onChanged: (_) => setState(() {
+                    _probe = null;
+                    _formError = null;
+                  }),
+                ),
+                _field(
+                  _baseUrl,
+                  'Base URL',
+                  required: true,
+                  hint: 'OpenAI 标准，如 https://api.deepseek.com/v1',
+                ),
+                _field(
+                  _model,
+                  'Model',
+                  required: true,
+                  hint: '如 deepseek-chat',
+                ),
+                if (_isCodexProvider) _codexAuthNote() else _keyField(),
+                if (_formError != null) ...[
+                  const SizedBox(height: 12),
+                  _banner(_formError!, AppColors.danger, Icons.error_outline),
+                ],
+                if (_probe != null) ...[
+                  const SizedBox(height: 12),
+                  _probeReport(_probe!),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: _busy ? null : _cancel,
+            child: const Text('取消'),
+          ),
+          FilledButton.icon(
+            onPressed: _busy ? null : _saveWithValidation,
+            icon: _busy
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Color(0xFF07231F),
+                    ),
+                  )
+                : const Icon(Icons.verified_outlined, size: 18),
+            label: Text(_busy ? '校验中…' : '校验并保存'),
+          ),
         ],
       ),
-      content: ConstrainedBox(
-        constraints: BoxConstraints(
-          minWidth: 640,
-          maxWidth: MediaQuery.sizeOf(context).width * 0.72,
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _presetGrid(),
-              const SizedBox(height: 8),
-              _field(_label, '显示名称', hint: '如 DeepSeek Chat（留空用 model）'),
-              _field(
-                _provider,
-                'Provider',
-                hint: '展示用标签，如 deepseek',
-                onChanged: (_) => setState(() {
-                  _probe = null;
-                  _formError = null;
-                }),
-              ),
-              _field(
-                _baseUrl,
-                'Base URL',
-                required: true,
-                hint: 'OpenAI 标准，如 https://api.deepseek.com/v1',
-              ),
-              _field(_model, 'Model', required: true, hint: '如 deepseek-chat'),
-              if (_isCodexProvider) _codexAuthNote() else _keyField(),
-              if (_formError != null) ...[
-                const SizedBox(height: 12),
-                _banner(_formError!, AppColors.danger, Icons.error_outline),
-              ],
-              if (_probe != null) ...[
-                const SizedBox(height: 12),
-                _probeReport(_probe!),
-              ],
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: _busy ? null : () => Navigator.pop(context, false),
-          child: const Text('取消'),
-        ),
-        FilledButton.icon(
-          onPressed: _busy ? null : _saveWithValidation,
-          icon: _busy
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Color(0xFF07231F),
-                  ),
-                )
-              : const Icon(Icons.verified_outlined, size: 18),
-          label: Text(_busy ? '校验中…' : '校验并保存'),
-        ),
-      ],
     );
   }
 

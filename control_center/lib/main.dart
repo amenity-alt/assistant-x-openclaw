@@ -63,6 +63,7 @@ void main() async {
       MenuItem(
         label: '退出',
         onClick: (menuItem) async {
+          _broadcastAction('stop');
           await windowManager.destroy();
         },
       ),

@@ -12,6 +12,7 @@ import '../theme.dart';
 import 'global_config_page.dart';
 import 'speaker_manage_page.dart';
 import 'model_manage_page.dart';
+import 'proactive_vision_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -72,6 +73,9 @@ class HomePageState extends State<HomePage> {
           }
         }
       });
+      if (msg.contains('语音助手已启动')) {
+        _startProactiveVisionIfEnabled();
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -83,6 +87,11 @@ class HomePageState extends State<HomePage> {
       });
     });
     _startTcpServer();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _service.isRunning) {
+        _startProactiveVisionIfEnabled();
+      }
+    });
   }
 
   Future<void> _initNotifications() async {
@@ -280,12 +289,33 @@ class HomePageState extends State<HomePage> {
   }
 
   void _start() async {
+    ServiceFactory.proactiveVisionWatcher.stop();
+    if (_service.isRunning) {
+      if (Platform.isMacOS || Platform.isWindows) {
+        final service = _service as dynamic;
+        await service.forceCleanup();
+      } else {
+        await _service.stop();
+      }
+    }
     await _service.start();
     setState(() => _isRunning = _service.isRunning);
+    if (_service.isRunning) {
+      await _startProactiveVisionIfEnabled();
+    }
+  }
+
+  Future<void> _startProactiveVisionIfEnabled() async {
+    try {
+      await ServiceFactory.proactiveVisionWatcher.startFromSavedConfig();
+    } catch (e) {
+      _service.addLog('主动视觉启动检查失败：$e');
+    }
   }
 
   void _stop() async {
     await _service.stop();
+    ServiceFactory.proactiveVisionWatcher.stop();
     setState(() => _isRunning = false);
   }
 
@@ -406,6 +436,7 @@ class HomePageState extends State<HomePage> {
   }
 
   Future<void> _forceStop() async {
+    ServiceFactory.proactiveVisionWatcher.stop();
     if (Platform.isMacOS) {
       final service = _service as dynamic;
       await service.forceCleanup();
@@ -586,6 +617,20 @@ class HomePageState extends State<HomePage> {
                     context,
                     MaterialPageRoute(
                       builder: (_) => const HudRoute(child: ModelManagePage()),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(width: 10),
+              _topNavButton(
+                icon: Icons.visibility_outlined,
+                label: '视觉',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          const HudRoute(child: ProactiveVisionPage()),
                     ),
                   );
                 },
@@ -808,7 +853,8 @@ class HomePageState extends State<HomePage> {
               log.message.contains('Hermes'),
         )
         .length;
-    final load = (_logs.length % 37) + 12;
+    final proactiveVisionRunning =
+        ServiceFactory.proactiveVisionWatcher.isRunning;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(28, 0, 28, 22),
@@ -846,10 +892,9 @@ class HomePageState extends State<HomePage> {
           const SizedBox(width: 14),
           Expanded(
             child: _metricCard(
-              Icons.show_chart,
-              '系统负载',
-              '$load%',
-              trailing: const _MetricSparkline(),
+              Icons.visibility_outlined,
+              '主动视觉',
+              proactiveVisionRunning ? '运行中' : '停止',
             ),
           ),
         ],
@@ -864,7 +909,7 @@ class HomePageState extends State<HomePage> {
     Widget? trailing,
   }) {
     return Container(
-      height: 68,
+      constraints: const BoxConstraints(minHeight: 70),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         gradient: AppGradients.panel,
@@ -892,6 +937,7 @@ class HomePageState extends State<HomePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
                   label,
@@ -1173,56 +1219,6 @@ class _OrbitPainter extends CustomPainter {
     ]) {
       canvas.drawCircle(point, 2, dot);
     }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _MetricSparkline extends StatelessWidget {
-  const _MetricSparkline();
-
-  @override
-  Widget build(BuildContext context) {
-    return const SizedBox(
-      width: 54,
-      height: 28,
-      child: CustomPaint(painter: _MetricSparkPainter()),
-    );
-  }
-}
-
-class _MetricSparkPainter extends CustomPainter {
-  const _MetricSparkPainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = AppColors.accentDeep
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4;
-    final path = Path();
-    final values = <double>[
-      0.82,
-      0.76,
-      0.78,
-      0.58,
-      0.62,
-      0.34,
-      0.42,
-      0.18,
-      0.28,
-    ];
-    for (var i = 0; i < values.length; i++) {
-      final x = i * size.width / (values.length - 1);
-      final y = values[i] * size.height;
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
-    canvas.drawPath(path, paint);
   }
 
   @override

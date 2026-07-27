@@ -51,6 +51,10 @@ class WindowsVoiceAssistantService implements VoiceAssistantServiceBase {
     _forceStop = false;
     _startCompleter = Completer<void>();
 
+    if (_pythonProcess != null) {
+      _pythonProcess!.kill();
+      _pythonProcess = null;
+    }
     await _killProcessesOnPorts();
 
     if (!_shouldKeepRunning || _forceStop) {

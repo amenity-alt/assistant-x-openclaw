@@ -49,6 +49,41 @@ class ConfigService {
         values['VOICE_ASSISTANT_MEDIA_WAKE_GUARD_ENFORCE'],
         false,
       ),
+      proactiveVisionEnabled: _asBool(
+        values['VOICE_ASSISTANT_PROACTIVE_VISION_ENABLED'],
+        false,
+      ),
+      proactiveVisionOllamaUrl:
+          values['VOICE_ASSISTANT_PROACTIVE_VISION_OLLAMA_URL'] ??
+          'http://127.0.0.1:11434',
+      proactiveVisionModel:
+          values['VOICE_ASSISTANT_PROACTIVE_VISION_MODEL'] ?? 'minicpm-v4.6:1b',
+      proactiveVisionPrompt:
+          values['VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT'] ?? '请描述当前屏幕上的内容',
+      proactiveVisionIntervalSeconds: _asInt(
+        values['VOICE_ASSISTANT_PROACTIVE_VISION_INTERVAL_SECONDS'],
+        20,
+      ),
+      proactiveVisionTriggers: _asStringList(
+        values['VOICE_ASSISTANT_PROACTIVE_VISION_TRIGGERS'],
+        const [
+          '测试失败、构建失败、IDE 或终端出现明显错误',
+          '系统关键弹窗、权限弹窗、任务完成或失败提示',
+          '会议中有人明确向主人提问或等待主人回应',
+          '需要立即处理的异常、风险、阻塞或确认',
+        ],
+      ),
+      proactiveVisionIgnoredApps: _asStringList(
+        values['VOICE_ASSISTANT_PROACTIVE_VISION_IGNORED_APPS'],
+        const [
+          'Control Center',
+          'control_center',
+          '语音助手控制中心',
+          'ASSISTANT-X-OPENCLAW',
+          'Assistant-X-OpenClaw',
+          'assistant-x-openclaw',
+        ],
+      ),
       assistantEffects: assistantEffects,
     );
   }
@@ -68,6 +103,27 @@ class ConfigService {
       ),
       'VOICE_ASSISTANT_MEDIA_WAKE_GUARD_ENFORCE': _formatBool(
         config.mediaWakeGuardEnforce,
+      ),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_ENABLED': _formatBool(
+        config.proactiveVisionEnabled,
+      ),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_OLLAMA_URL': _formatSingleLine(
+        config.proactiveVisionOllamaUrl,
+      ),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_MODEL': _formatSingleLine(
+        config.proactiveVisionModel,
+      ),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT': _formatSingleLine(
+        config.proactiveVisionPrompt,
+      ),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_INTERVAL_SECONDS': config
+          .proactiveVisionIntervalSeconds
+          .toString(),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_TRIGGERS': jsonEncode(
+        config.proactiveVisionTriggers,
+      ),
+      'VOICE_ASSISTANT_PROACTIVE_VISION_IGNORED_APPS': jsonEncode(
+        config.proactiveVisionIgnoredApps,
       ),
     };
 
@@ -177,7 +233,35 @@ class ConfigService {
     return double.tryParse(value.trim()) ?? fallback;
   }
 
+  int _asInt(String? value, int fallback) {
+    if (value == null) return fallback;
+    return int.tryParse(value.trim()) ?? fallback;
+  }
+
+  List<String> _asStringList(String? value, List<String> fallback) {
+    if (value == null || value.trim().isEmpty) return fallback;
+    try {
+      final decoded = jsonDecode(value.trim());
+      if (decoded is List) {
+        final items = decoded
+            .map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty)
+            .toList();
+        if (items.isNotEmpty) return items;
+      }
+    } catch (_) {}
+    final items = value
+        .split(RegExp(r'[|,，;；]'))
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+    return items.isEmpty ? fallback : items;
+  }
+
   String _formatBool(bool value) => value ? 'true' : 'false';
+
+  String _formatSingleLine(String value) =>
+      value.trim().replaceAll(RegExp(r'\s+'), ' ');
 
   String _formatDouble(double value) {
     final fixed = value.toStringAsFixed(3);
@@ -194,6 +278,13 @@ class GlobalConfig {
   final double livenessThreshold;
   final bool mediaWakeGuardEnabled;
   final bool mediaWakeGuardEnforce;
+  final bool proactiveVisionEnabled;
+  final String proactiveVisionOllamaUrl;
+  final String proactiveVisionModel;
+  final String proactiveVisionPrompt;
+  final int proactiveVisionIntervalSeconds;
+  final List<String> proactiveVisionTriggers;
+  final List<String> proactiveVisionIgnoredApps;
   final List<AssistantEffectConfig> assistantEffects;
 
   const GlobalConfig({
@@ -203,6 +294,13 @@ class GlobalConfig {
     required this.livenessThreshold,
     required this.mediaWakeGuardEnabled,
     required this.mediaWakeGuardEnforce,
+    required this.proactiveVisionEnabled,
+    required this.proactiveVisionOllamaUrl,
+    required this.proactiveVisionModel,
+    required this.proactiveVisionPrompt,
+    required this.proactiveVisionIntervalSeconds,
+    required this.proactiveVisionTriggers,
+    required this.proactiveVisionIgnoredApps,
     required this.assistantEffects,
   });
 
@@ -213,6 +311,13 @@ class GlobalConfig {
     double? livenessThreshold,
     bool? mediaWakeGuardEnabled,
     bool? mediaWakeGuardEnforce,
+    bool? proactiveVisionEnabled,
+    String? proactiveVisionOllamaUrl,
+    String? proactiveVisionModel,
+    String? proactiveVisionPrompt,
+    int? proactiveVisionIntervalSeconds,
+    List<String>? proactiveVisionTriggers,
+    List<String>? proactiveVisionIgnoredApps,
     List<AssistantEffectConfig>? assistantEffects,
   }) {
     return GlobalConfig(
@@ -224,9 +329,72 @@ class GlobalConfig {
           mediaWakeGuardEnabled ?? this.mediaWakeGuardEnabled,
       mediaWakeGuardEnforce:
           mediaWakeGuardEnforce ?? this.mediaWakeGuardEnforce,
+      proactiveVisionEnabled:
+          proactiveVisionEnabled ?? this.proactiveVisionEnabled,
+      proactiveVisionOllamaUrl:
+          proactiveVisionOllamaUrl ?? this.proactiveVisionOllamaUrl,
+      proactiveVisionModel: proactiveVisionModel ?? this.proactiveVisionModel,
+      proactiveVisionPrompt:
+          proactiveVisionPrompt ?? this.proactiveVisionPrompt,
+      proactiveVisionIntervalSeconds:
+          proactiveVisionIntervalSeconds ?? this.proactiveVisionIntervalSeconds,
+      proactiveVisionTriggers:
+          proactiveVisionTriggers ?? this.proactiveVisionTriggers,
+      proactiveVisionIgnoredApps:
+          proactiveVisionIgnoredApps ?? this.proactiveVisionIgnoredApps,
       assistantEffects: assistantEffects ?? this.assistantEffects,
     );
   }
+
+  @override
+  bool operator ==(Object other) {
+    return other is GlobalConfig &&
+        speakerThreshold == other.speakerThreshold &&
+        livenessEnabled == other.livenessEnabled &&
+        livenessEnforce == other.livenessEnforce &&
+        livenessThreshold == other.livenessThreshold &&
+        mediaWakeGuardEnabled == other.mediaWakeGuardEnabled &&
+        mediaWakeGuardEnforce == other.mediaWakeGuardEnforce &&
+        proactiveVisionEnabled == other.proactiveVisionEnabled &&
+        proactiveVisionOllamaUrl == other.proactiveVisionOllamaUrl &&
+        proactiveVisionModel == other.proactiveVisionModel &&
+        proactiveVisionPrompt == other.proactiveVisionPrompt &&
+        proactiveVisionIntervalSeconds ==
+            other.proactiveVisionIntervalSeconds &&
+        _listEquals(proactiveVisionTriggers, other.proactiveVisionTriggers) &&
+        _listEquals(
+          proactiveVisionIgnoredApps,
+          other.proactiveVisionIgnoredApps,
+        ) &&
+        _listEquals(assistantEffects, other.assistantEffects);
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    speakerThreshold,
+    livenessEnabled,
+    livenessEnforce,
+    livenessThreshold,
+    mediaWakeGuardEnabled,
+    mediaWakeGuardEnforce,
+    proactiveVisionEnabled,
+    proactiveVisionOllamaUrl,
+    proactiveVisionModel,
+    proactiveVisionPrompt,
+    proactiveVisionIntervalSeconds,
+    Object.hashAll(proactiveVisionTriggers),
+    Object.hashAll(proactiveVisionIgnoredApps),
+    Object.hashAll(assistantEffects),
+  );
+}
+
+bool _listEquals<T>(List<T> a, List<T> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 class AssistantEffectConfig {
@@ -247,4 +415,15 @@ class AssistantEffectConfig {
       visualEffect: visualEffect ?? this.visualEffect,
     );
   }
+
+  @override
+  bool operator ==(Object other) {
+    return other is AssistantEffectConfig &&
+        id == other.id &&
+        name == other.name &&
+        visualEffect == other.visualEffect;
+  }
+
+  @override
+  int get hashCode => Object.hash(id, name, visualEffect);
 }

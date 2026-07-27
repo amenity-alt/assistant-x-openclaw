@@ -80,6 +80,45 @@ class _ExitAPIHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "dnd": False}).encode())
+        elif self.path == "/proactive-command":
+            if _assistant_instance is None:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "assistant not ready"}).encode())
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                if length <= 0:
+                    raise ValueError("request body is required")
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                text = str(payload.get("text") or "").strip()
+                assistant_id = str(payload.get("assistant_id") or "jarvis").strip()
+                source = str(payload.get("source") or "proactive_vision").strip()
+                summary = str(payload.get("summary") or "").strip()
+                action = str(payload.get("action") or "").strip()
+                confidence = payload.get("confidence")
+            except Exception as e:  # noqa: BLE001
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"invalid payload: {e}"}).encode())
+                return
+            if not text:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "text is required"}).encode())
+                return
+            threading.Thread(
+                target=_assistant_instance.proactive_command,
+                args=(text, assistant_id, source, summary, action, confidence),
+                daemon=True,
+            ).start()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -162,7 +201,7 @@ from tts import (
 )
 from log_setup import setup_logging, get_diag_logger
 from lifecycle import get_lifecycle_manager
-from media_pause import MediaPauseHook
+from media_pause import MediaPauseHook, get_media_controller
 from dock_control import DockAutohideHook
 
 # 文件级诊断/错误日志（只落盘，不进控制中心）
@@ -3373,6 +3412,99 @@ class VoiceAssistant:
             return routing.handoff_intent(text)
         except Exception:  # noqa: BLE001
             return ""
+
+    def proactive_command(
+        self,
+        text: str,
+        assistant_id: str = "jarvis",
+        source: str = "proactive_vision",
+        summary: str = "",
+        action: str = "",
+        confidence=None,
+    ):
+        """控制中心主动视觉命中后，真实唤醒助手并把文本当作用户指令处理。"""
+        text = (text or "").strip()
+        if not text:
+            return
+
+        wrapped_text = self._wrap_proactive_command(
+            text=text,
+            source=source,
+            summary=summary,
+            action=action,
+            confidence=confidence,
+            event_time=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+        print(f"[主动视觉] 真实唤醒并投递指令: {text[:120]}")
+        self._wake_and_handle_command(
+            wrapped_text,
+            assistant_id=assistant_id,
+            display_text=text,
+            source_label="主动视觉",
+        )
+
+    def _wake_and_handle_command(
+        self,
+        command: str,
+        assistant_id: str = "",
+        display_text: str = "",
+        source_label: str = "外部事件",
+    ):
+        """非麦克风入口的统一唤醒路径：先做唤醒副作用，再进入对话链路。"""
+        command = (command or "").strip()
+        if not command:
+            return
+        assistant_id = (assistant_id or "jarvis").strip()
+        try:
+            if assistant_id and assistant_id != self.current_cfg.get("id"):
+                self._switch_and_init_assistant(assistant_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{source_label}] 切换助手失败，沿用当前助手: {e}")
+
+        if self.is_awake and self._is_openclaw_busy:
+            self._interrupt_openclaw()
+
+        self._pause_media_before_external_wake(source_label)
+        self.is_awake = True
+        self.continuous_mode = True
+        self.last_voice_time = time.time()
+        self._last_wake_time = time.time()
+        self._pending_resume_decision = False
+        self.visual.show_wake_effect()
+        if display_text:
+            self.visual.show_user_text(display_text)
+        self._on_recognized(command)
+
+    @staticmethod
+    def _pause_media_before_external_wake(source_label: str):
+        try:
+            get_media_controller().pause()
+        except Exception as e:  # noqa: BLE001
+            print(f"[{source_label}] 唤醒前暂停媒体失败，继续处理: {e}")
+
+    @staticmethod
+    def _wrap_proactive_command(
+        text: str,
+        source: str = "proactive_vision",
+        summary: str = "",
+        action: str = "",
+        confidence=None,
+        event_time: str = "",
+    ) -> str:
+        observed_text = summary.strip() or text.strip()
+        if action:
+            observed_text = f"{observed_text}；建议动作：{action}"
+        parts = [
+            f"以下是由主动视觉检测到的内容：{observed_text}",
+            f"来源: {source or 'proactive_vision'}",
+            f"当前时间: {event_time or time.strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        if confidence is not None:
+            parts.append(f"置信度: {confidence}")
+        if text and text != summary:
+            parts.extend(["", f"原始检测指令: {text}"])
+        return "\n".join(parts)
 
     def _on_recognized(self, text: str):
         """识别结果 → 发送给当前主脑 → 整体合成播报回复"""
