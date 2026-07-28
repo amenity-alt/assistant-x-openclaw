@@ -57,7 +57,8 @@ class ConfigService {
           values['VOICE_ASSISTANT_PROACTIVE_VISION_OLLAMA_URL'] ??
           'http://127.0.0.1:11434',
       proactiveVisionModel:
-          values['VOICE_ASSISTANT_PROACTIVE_VISION_MODEL'] ?? 'minicpm-v4.6:1b',
+          values['VOICE_ASSISTANT_PROACTIVE_VISION_MODEL'] ??
+          'minicpm-v4.6:latest',
       proactiveVisionPrompt:
           values['VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT'] ?? '请描述当前屏幕上的内容',
       proactiveVisionIntervalSeconds: _asInt(

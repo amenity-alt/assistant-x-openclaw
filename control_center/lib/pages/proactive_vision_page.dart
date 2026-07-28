@@ -248,7 +248,7 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
 
   String get _model {
     final value = _modelController.text.trim();
-    return value.isEmpty ? 'minicpm-v4.6:1b' : value;
+    return value.isEmpty ? 'minicpm-v4.6:latest' : value;
   }
 
   int get _intervalSeconds {
