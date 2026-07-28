@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../services/base/proactive_vision_service_base.dart';
 import '../services/config_service.dart';
+import '../services/proactive_vision_prompt.dart';
 import '../services/proactive_vision_watcher.dart';
 import '../services/service_factory.dart';
 import '../theme.dart';
@@ -256,19 +257,12 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
     return parsed.clamp(5, 3600).toInt();
   }
 
-  static const List<String> _defaultTriggers = [
-    '测试失败、构建失败、IDE 或终端出现明显错误',
-    '系统关键弹窗、权限弹窗、任务完成或失败提示',
-    '会议中有人明确向主人提问或等待主人回应',
-    '需要立即处理的异常、风险、阻塞或确认',
-  ];
-
   List<String> get _triggerList {
     final items = _triggerControllers
         .map((controller) => controller.text.trim())
         .where((line) => line.isNotEmpty)
         .toList();
-    return items.isEmpty ? [_defaultTriggers.first] : items;
+    return items.isEmpty ? [defaultProactiveVisionTriggers.first] : items;
   }
 
   List<String> get _ignoredAppList {
@@ -331,7 +325,7 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
     _triggerControllers
       ..clear()
       ..addAll(
-        (values.isEmpty ? [_defaultTriggers.first] : values).map(
+        (values.isEmpty ? [defaultProactiveVisionTriggers.first] : values).map(
           _createTriggerController,
         ),
       );
@@ -567,8 +561,9 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
               minLines: 3,
               maxLines: 5,
               decoration: const InputDecoration(
-                labelText: '单次测试提示词',
+                labelText: '主动视觉提示词',
                 prefixIcon: Icon(Icons.chat_bubble_outline),
+                helperText: '默认内容与后台 watcher 当前使用的判定提示词一致。',
               ),
             ),
             const SizedBox(height: 12),

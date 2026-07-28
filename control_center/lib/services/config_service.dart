@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'proactive_vision_prompt.dart';
+
 class ConfigService {
   String get _projectDir {
     final home =
@@ -60,19 +62,15 @@ class ConfigService {
           values['VOICE_ASSISTANT_PROACTIVE_VISION_MODEL'] ??
           'minicpm-v4.6:latest',
       proactiveVisionPrompt:
-          values['VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT'] ?? '请描述当前屏幕上的内容',
+          values['VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT'] ??
+          buildProactiveVisionPrompt(),
       proactiveVisionIntervalSeconds: _asInt(
         values['VOICE_ASSISTANT_PROACTIVE_VISION_INTERVAL_SECONDS'],
         20,
       ),
       proactiveVisionTriggers: _asStringList(
         values['VOICE_ASSISTANT_PROACTIVE_VISION_TRIGGERS'],
-        const [
-          '测试失败、构建失败、IDE 或终端出现明显错误',
-          '系统关键弹窗、权限弹窗、任务完成或失败提示',
-          '会议中有人明确向主人提问或等待主人回应',
-          '需要立即处理的异常、风险、阻塞或确认',
-        ],
+        defaultProactiveVisionTriggers,
       ),
       proactiveVisionIgnoredApps: _asStringList(
         values['VOICE_ASSISTANT_PROACTIVE_VISION_IGNORED_APPS'],
