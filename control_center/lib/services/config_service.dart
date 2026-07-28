@@ -61,9 +61,7 @@ class ConfigService {
       proactiveVisionModel:
           values['VOICE_ASSISTANT_PROACTIVE_VISION_MODEL'] ??
           'minicpm-v4.6:latest',
-      proactiveVisionPrompt:
-          values['VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT'] ??
-          buildProactiveVisionPrompt(),
+      proactiveVisionPrompt: buildProactiveVisionPrompt(),
       proactiveVisionIntervalSeconds: _asInt(
         values['VOICE_ASSISTANT_PROACTIVE_VISION_INTERVAL_SECONDS'],
         20,
@@ -112,9 +110,6 @@ class ConfigService {
       'VOICE_ASSISTANT_PROACTIVE_VISION_MODEL': _formatSingleLine(
         config.proactiveVisionModel,
       ),
-      'VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT': _formatSingleLine(
-        config.proactiveVisionPrompt,
-      ),
       'VOICE_ASSISTANT_PROACTIVE_VISION_INTERVAL_SECONDS': config
           .proactiveVisionIntervalSeconds
           .toString(),
@@ -142,6 +137,9 @@ class ConfigService {
         continue;
       }
       final key = match.group(1)!;
+      if (key == 'VOICE_ASSISTANT_PROACTIVE_VISION_PROMPT') {
+        continue;
+      }
       if (!updates.containsKey(key)) {
         next.add(line);
         continue;

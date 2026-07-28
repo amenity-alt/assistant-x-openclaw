@@ -429,6 +429,7 @@ ScreenCaptureKit 实现；Windows 预留 `native/windows_system_audio_capture.ex
 |---|------|----------|
 | 10 | Qwen3-ASR 离线识别模型（贾维斯默认 `asr_mode: "offline"` 使用，缺失自动回退流式识别） | [sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2) |
 | 11 | ZipVoice TTS 模型（零样本声音克隆） | [sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2) |
+| 12 | JARVIS-V2 MeloTTS ONNX 中英混合语音模型（`jarvis_v2_onnx_lang_sch`） | [jarvis-v2-melotts-onnx-lang-sch.zip](https://modelscope.cn/datasets/rubintry/jarvis/file/view/master/jarvis-v2-melotts-onnx-lang-sch.zip)（ModelScope，下载后在 `models/` 目录解压，得到 `models/jarvis-v2-melotts-onnx/`） |
 
 > **活体检测免责声明：** AASIST-L 已接入唤醒验证链路，用于判断唤醒音频是否像真人现场语音；但任何活体检测模型都不能保证 100% 拦截录音、合成语音或扬声器重放。实际效果会受麦克风、扬声器、房间环境、录入声纹质量和阈值设置影响；高安全场景请结合声纹验证、媒体播放门禁、重新录入声纹和本机样本校准后使用。
 

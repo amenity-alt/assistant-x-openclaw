@@ -558,12 +558,13 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
             const SizedBox(height: 12),
             TextField(
               controller: _promptController,
+              readOnly: true,
               minLines: 3,
               maxLines: 5,
               decoration: const InputDecoration(
-                labelText: '主动视觉提示词',
+                labelText: '主动视觉提示词模板',
                 prefixIcon: Icon(Icons.chat_bubble_outline),
-                helperText: '默认内容与后台 watcher 当前使用的判定提示词一致。',
+                helperText: '运行时会动态注入当前时间、前台 App 和各场景连续命中状态。',
               ),
             ),
             const SizedBox(height: 12),

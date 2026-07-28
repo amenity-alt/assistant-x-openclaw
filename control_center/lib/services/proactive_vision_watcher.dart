@@ -96,6 +96,7 @@ class ProactiveVisionWatcher {
     stop();
     _config = config;
     _running = true;
+    _initializeDurationStates(config, DateTime.now());
     _log('主动视觉随助手启动，采样间隔 ${_interval.inSeconds}s');
     _runTick();
     _timer = Timer.periodic(_interval, (_) => _runTick());
@@ -142,21 +143,20 @@ class ProactiveVisionWatcher {
         _log('主动视觉跳过前台 App：${foreground.name}');
         return;
       }
-      if (await _maybeDispatchElapsedDurationHit(config, foreground)) {
-        return;
-      }
-      _resetContinuousHitIfForegroundChanged(config, foreground);
+      final durationProgress = _durationWaitingMessage(config);
 
       final snapshot = await _visionService.captureScreenSnapshot();
       if (_lastScreenSignature == snapshot.signature) {
-        if (await _maybeDispatchUnchangedDurationHit(config)) {
+        if (await _maybeDispatchUnchangedDurationHit(config, foreground)) {
           return;
         }
-        final waitingMessage = _durationWaitingMessage(config);
-        _log(waitingMessage ?? '主动视觉屏幕变化不明显，跳过');
+        _log(durationProgress ?? '主动视觉屏幕变化不明显，跳过');
         return;
       }
       _lastScreenSignature = snapshot.signature;
+      if (durationProgress != null) {
+        _log(durationProgress);
+      }
 
       _log('主动视觉主人在场判断暂未实现：本轮仅打印占位，不拦截');
       debugPrint('[主动视觉] owner-present check placeholder: not enforced');
@@ -167,14 +167,13 @@ class ProactiveVisionWatcher {
         prompt: buildProactiveVisionPrompt(
           foregroundApp: foreground,
           triggers: config.proactiveVisionTriggers,
+          currentTime: _lastSampleAt,
+          triggerStates: _promptStatesForForeground(config, foreground),
         ),
         pngBytes: snapshot.pngBytes,
       );
       final decision = _parseDecision(result.response);
       if (!decision.shouldTrigger) {
-        if (!_hasActiveDurationHitFor(config, foreground)) {
-          _resetDurationStatesForForeground(config, foreground);
-        }
         _log(
           '主动视觉未触发：${decision.summary.isEmpty ? '模型未给出触发事件' : decision.summary}',
         );
@@ -182,7 +181,7 @@ class ProactiveVisionWatcher {
       }
 
       _log(
-        '主动视觉命中 ${decision.confidence.toStringAsFixed(2)}：${decision.summary}',
+        '主动视觉候选命中 ${decision.confidence.toStringAsFixed(2)}：${decision.summary}',
       );
       final gate = _durationGate(config, decision, foreground);
       if (!gate.allowed) {
@@ -191,7 +190,7 @@ class ProactiveVisionWatcher {
       }
       _log('主动视觉持续条件已满足，准备唤醒 Jarvis');
       if (await _dispatchTrigger(decision)) {
-        _resetDurationState(gate.triggerKey);
+        _startNextDurationCycle(gate.triggerKey, DateTime.now());
       }
     } catch (e) {
       _log('主动视觉本轮异常，静默跳过：$e');
@@ -418,7 +417,7 @@ class ProactiveVisionWatcher {
     _DurationHitState? closestState;
     Duration? closestRemaining;
     for (final requirement in requirements) {
-      final key = _durationHitKey(requirement, app);
+      final key = _durationHitKey(requirement);
       final state = _durationStates.putIfAbsent(
         key,
         () => _DurationHitState(startedAt: now),
@@ -426,8 +425,9 @@ class ProactiveVisionWatcher {
       state
         ..decision = decision
         ..foregroundApp = app
-        ..trigger = requirement.trigger;
-      final elapsed = now.difference(state.startedAt);
+        ..trigger = requirement.trigger
+        ..lastHitAt = now;
+      final elapsed = state.elapsedAt(now);
       if (elapsed >= requirement.duration) {
         return _DurationGateResult.allowed(triggerKey: key);
       }
@@ -439,9 +439,10 @@ class ProactiveVisionWatcher {
       }
     }
 
-    final elapsed = now.difference(closestState!.startedAt);
+    final elapsed = closestState!.elapsedAt(now);
+    final remaining = closestRequirement!.duration - elapsed;
     return _DurationGateResult.blocked(
-      '主动视觉场景「${closestRequirement!.trigger}」连续命中 ${_formatDuration(elapsed)}，未达到触发条件要求的 ${_formatDuration(closestRequirement.duration)}',
+      '主动视觉进度「${closestRequirement.trigger}」：已持续 ${_formatDuration(elapsed)} / 目标 ${_formatDuration(closestRequirement.duration)} / 剩余 ${_formatDuration(remaining)}，暂不唤醒',
     );
   }
 
@@ -449,19 +450,15 @@ class ProactiveVisionWatcher {
     final active = _activeDurationStates(config);
     if (active.isEmpty) return null;
     final entry = active.first;
-    final elapsed = DateTime.now().difference(entry.value.startedAt);
+    final elapsed = entry.value.elapsedAt(DateTime.now());
     final required = entry.key.duration;
     if (elapsed >= required) {
-      return '主动视觉场景「${entry.key.trigger}」已连续命中 ${_formatDuration(elapsed)}，等待下一轮触发';
+      return '主动视觉进度「${entry.key.trigger}」：已持续 ${_formatDuration(elapsed)} / 目标 ${_formatDuration(required)} / 已达标';
     }
-    return '主动视觉场景「${entry.key.trigger}」连续命中 ${_formatDuration(elapsed)}，未达到 ${_formatDuration(required)}';
+    return '主动视觉进度「${entry.key.trigger}」：已持续 ${_formatDuration(elapsed)} / 目标 ${_formatDuration(required)} / 剩余 ${_formatDuration(required - elapsed)}';
   }
 
-  Future<bool> _maybeDispatchUnchangedDurationHit(GlobalConfig config) async {
-    return _maybeDispatchReadyDurationState(config, null);
-  }
-
-  Future<bool> _maybeDispatchElapsedDurationHit(
+  Future<bool> _maybeDispatchUnchangedDurationHit(
     GlobalConfig config,
     ForegroundAppInfo app,
   ) async {
@@ -483,10 +480,10 @@ class ProactiveVisionWatcher {
         if (stateApp == null || state.decision?.shouldTrigger != true) {
           return false;
         }
-        if (app != null && entry.key != _durationHitKey(requirement, app)) {
+        if (app != null && !_sameForegroundApp(stateApp, app)) {
           return false;
         }
-        return now.difference(state.startedAt) >= requirement.duration;
+        return state.elapsedAt(now) >= requirement.duration;
       }).toList();
       if (states.isEmpty) continue;
 
@@ -494,25 +491,20 @@ class ProactiveVisionWatcher {
       final decision = entry.value.decision!;
       _log('主动视觉场景「${requirement.trigger}」已达时长，使用持续观察记录触发：${decision.summary}');
       if (await _dispatchTrigger(decision)) {
-        _resetDurationState(entry.key);
+        _startNextDurationCycle(entry.key, now);
       }
       return true;
     }
     return false;
   }
 
-  bool _hasActiveDurationHitFor(GlobalConfig config, ForegroundAppInfo app) {
-    return _durationRequirements(config.proactiveVisionTriggers).any(
-      (requirement) =>
-          _durationStates.containsKey(_durationHitKey(requirement, app)),
-    );
-  }
-
-  void _resetContinuousHitIfForegroundChanged(
-    GlobalConfig config,
-    ForegroundAppInfo app,
-  ) {
-    _resetDurationStatesExceptForeground(config, app);
+  bool _sameForegroundApp(ForegroundAppInfo left, ForegroundAppInfo right) {
+    final leftBundle = left.bundleIdentifier.trim();
+    final rightBundle = right.bundleIdentifier.trim();
+    if (leftBundle.isNotEmpty || rightBundle.isNotEmpty) {
+      return leftBundle == rightBundle;
+    }
+    return left.name.trim() == right.name.trim();
   }
 
   List<_DurationRequirement> _durationRequirements(List<String> triggers) {
@@ -544,6 +536,28 @@ class ProactiveVisionWatcher {
         .where((requirement) => requirement.index == triggerIndex)
         .toList();
     return matched.isEmpty ? requirements : matched;
+  }
+
+  List<ProactiveVisionPromptState> _promptStatesForForeground(
+    GlobalConfig config,
+    ForegroundAppInfo app,
+  ) {
+    return _durationRequirements(config.proactiveVisionTriggers)
+        .map((requirement) {
+          final state = _durationStates[_durationHitKey(requirement)];
+          if (state == null) return null;
+          return ProactiveVisionPromptState(
+            index: requirement.index,
+            trigger: requirement.trigger,
+            startedAt: state.startedAt,
+            lastHitAt: state.lastHitAt,
+            elapsedDuration: state.elapsedAt(_lastSampleAt ?? DateTime.now()),
+            requiredDuration: requirement.duration,
+            summary: state.decision?.summary ?? '',
+          );
+        })
+        .whereType<ProactiveVisionPromptState>()
+        .toList();
   }
 
   Duration? _parseDurationRequirement(String text) {
@@ -587,54 +601,40 @@ class ProactiveVisionWatcher {
     }
   }
 
-  String _durationHitKey(
-    _DurationRequirement requirement,
-    ForegroundAppInfo app,
-  ) {
-    final appKey = app.bundleIdentifier.trim().isNotEmpty
-        ? app.bundleIdentifier.trim()
-        : app.name.trim();
-    final triggerKey = requirement.trigger.trim().toLowerCase();
-    return '$appKey|$triggerKey';
+  String _durationHitKey(_DurationRequirement requirement) {
+    return requirement.trigger.trim().toLowerCase();
   }
 
-  void _resetDurationState(String key) {
-    _durationStates.remove(key);
+  void _initializeDurationStates(GlobalConfig config, DateTime now) {
+    for (final requirement in _durationRequirements(
+      config.proactiveVisionTriggers,
+    )) {
+      _durationStates[_durationHitKey(requirement)] = _DurationHitState(
+        startedAt: now,
+      )..trigger = requirement.trigger;
+    }
+  }
+
+  void _startNextDurationCycle(String key, DateTime now) {
+    if (key.isEmpty) return;
+    _durationStates[key]?.startNextCycle(now);
   }
 
   void _resetDurationStates() {
     _durationStates.clear();
   }
 
-  void _resetDurationStatesForForeground(
-    GlobalConfig config,
-    ForegroundAppInfo app,
-  ) {
-    final keys = _durationRequirements(
-      config.proactiveVisionTriggers,
-    ).map((requirement) => _durationHitKey(requirement, app)).toSet();
-    _durationStates.removeWhere((key, _) => keys.contains(key));
-  }
-
-  void _resetDurationStatesExceptForeground(
-    GlobalConfig config,
-    ForegroundAppInfo app,
-  ) {
-    final keys = _durationRequirements(
-      config.proactiveVisionTriggers,
-    ).map((requirement) => _durationHitKey(requirement, app)).toSet();
-    _durationStates.removeWhere((key, _) => !keys.contains(key));
-  }
-
   String _formatDuration(Duration duration) {
-    if (duration.inHours > 0) {
-      final minutes = duration.inMinutes.remainder(60);
-      return minutes == 0
-          ? '${duration.inHours}小时'
-          : '${duration.inHours}小时$minutes分钟';
+    final safeDuration = duration.isNegative ? Duration.zero : duration;
+    final seconds = safeDuration.inSeconds.remainder(60);
+    if (safeDuration.inHours > 0) {
+      final minutes = safeDuration.inMinutes.remainder(60);
+      return '${safeDuration.inHours}小时$minutes分$seconds秒';
     }
-    if (duration.inMinutes > 0) return '${duration.inMinutes}分钟';
-    return '${duration.inSeconds}秒';
+    if (safeDuration.inMinutes > 0) {
+      return '${safeDuration.inMinutes}分$seconds秒';
+    }
+    return '${safeDuration.inSeconds}秒';
   }
 
   Future<bool> _dispatchTrigger(_VisionDecision decision) async {
@@ -812,10 +812,21 @@ class _DurationGateResult {
 }
 
 class _DurationHitState {
-  final DateTime startedAt;
+  DateTime startedAt;
+  DateTime lastHitAt;
   String trigger = '';
   _VisionDecision? decision;
   ForegroundAppInfo? foregroundApp;
 
-  _DurationHitState({required this.startedAt});
+  _DurationHitState({required this.startedAt}) : lastHitAt = startedAt;
+
+  Duration elapsedAt(DateTime now) {
+    if (!now.isAfter(startedAt)) return Duration.zero;
+    return now.difference(startedAt);
+  }
+
+  void startNextCycle(DateTime now) {
+    startedAt = now;
+    lastHitAt = now;
+  }
 }
