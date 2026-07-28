@@ -39,6 +39,10 @@ class ProactiveVisionWatcher {
   bool _busy = false;
   int? _lastScreenSignature;
   DateTime? _lastSampleAt;
+  DateTime? _continuousHitStartedAt;
+  String _continuousHitKey = '';
+  _VisionDecision? _continuousHitDecision;
+  ForegroundAppInfo? _continuousHitForegroundApp;
   String _lastMessage = '未启动';
   final _logs = <String>[];
   GlobalConfig? _config;
@@ -104,6 +108,7 @@ class ProactiveVisionWatcher {
     _timer = null;
     _running = false;
     _busy = false;
+    _resetContinuousHit();
     _lastMessage = '未启动';
     _emitState();
   }
@@ -139,10 +144,18 @@ class ProactiveVisionWatcher {
         _log('主动视觉跳过前台 App：${foreground.name}');
         return;
       }
+      if (await _maybeDispatchElapsedDurationHit(config, foreground)) {
+        return;
+      }
+      _resetContinuousHitIfForegroundChanged(config, foreground);
 
       final snapshot = await _visionService.captureScreenSnapshot();
       if (_lastScreenSignature == snapshot.signature) {
-        _log('主动视觉屏幕变化不明显，跳过');
+        if (await _maybeDispatchUnchangedDurationHit(config)) {
+          return;
+        }
+        final waitingMessage = _durationWaitingMessage(config);
+        _log(waitingMessage ?? '主动视觉屏幕变化不明显，跳过');
         return;
       }
       _lastScreenSignature = snapshot.signature;
@@ -158,6 +171,9 @@ class ProactiveVisionWatcher {
       );
       final decision = _parseDecision(result.response);
       if (!decision.shouldTrigger) {
+        if (!_hasActiveDurationHitFor(config, foreground)) {
+          _resetContinuousHit();
+        }
         _log(
           '主动视觉未触发：${decision.summary.isEmpty ? '模型未给出触发事件' : decision.summary}',
         );
@@ -167,6 +183,12 @@ class ProactiveVisionWatcher {
       _log(
         '主动视觉命中 ${decision.confidence.toStringAsFixed(2)}：${decision.summary}',
       );
+      final gate = _durationGate(config, decision, foreground);
+      if (!gate.allowed) {
+        _log(gate.message);
+        return;
+      }
+      _log('主动视觉持续条件已满足，准备唤醒 Jarvis');
       await _dispatchTrigger(decision);
     } catch (e) {
       _log('主动视觉本轮异常，静默跳过：$e');
@@ -216,6 +238,11 @@ $triggers
 
 忽略：普通网页浏览、静态桌面、无明显变化的代码/文档、广告、低价值通知。
 
+时长要求：
+- 如果触发条件包含“30分钟以上、2小时以上、持续 N 分钟”等时长要求，只判断当前画面是否属于该场景。
+- 不要根据单张截图断言已经达到持续时长；持续时长由外层 watcher 统计。
+- 这类场景尚未达到时长时，也可以返回 trigger=true 表示“当前画面属于该场景”，summary 必须写成“用户正在……”，不要写“已经持续……分钟”。
+
 人称要求：
 - summary 必须使用第三人称描述，例如“用户正在……，满足……条件”。
 - command 如果需要填写，也必须使用“用户/主人”，不要使用“你/我/我看到/提醒你”。
@@ -233,23 +260,86 @@ $triggers
   }
 
   _VisionDecision _parseDecision(String response) {
+    final sanitized = _removeThinkBlocks(response);
+    for (final candidate in _jsonObjectCandidates(
+      sanitized,
+    ).toList().reversed) {
+      try {
+        final decoded =
+            jsonDecode(_stripJsonLineComments(candidate))
+                as Map<String, dynamic>;
+        final decision = _decisionFromMap(decoded);
+        if (decision != null) return decision;
+      } catch (_) {
+        continue;
+      }
+    }
     for (final candidate in _jsonObjectCandidates(response).toList().reversed) {
       try {
         final decoded =
             jsonDecode(_stripJsonLineComments(candidate))
                 as Map<String, dynamic>;
-        return _VisionDecision(
-          trigger: decoded['trigger'] == true,
-          confidence: _readConfidence(decoded['confidence']),
-          action: decoded['action']?.toString() ?? 'none',
-          summary: decoded['summary']?.toString() ?? '',
-          command: decoded['command']?.toString() ?? '',
-        );
+        final decision = _decisionFromMap(decoded);
+        if (decision != null) return decision;
       } catch (_) {
         continue;
       }
     }
+    final looseDecision = _parseLooseDecision(response);
+    if (looseDecision != null) return looseDecision;
     return _VisionDecision.noop(response);
+  }
+
+  String _removeThinkBlocks(String response) {
+    return response.replaceAll(
+      RegExp(r'<think>[\s\S]*?</think>', caseSensitive: false),
+      '',
+    );
+  }
+
+  _VisionDecision? _decisionFromMap(Map<String, dynamic> decoded) {
+    if (!decoded.containsKey('trigger') &&
+        !decoded.containsKey('confidence') &&
+        !decoded.containsKey('summary')) {
+      return null;
+    }
+    return _VisionDecision(
+      trigger: decoded['trigger'] == true,
+      confidence: _readConfidence(decoded['confidence']),
+      action: decoded['action']?.toString() ?? 'none',
+      summary: decoded['summary']?.toString() ?? '',
+      command: decoded['command']?.toString() ?? '',
+    );
+  }
+
+  _VisionDecision? _parseLooseDecision(String response) {
+    final triggerMatch = RegExp(
+      r'["“]?trigger["”]?\s*[:：]\s*(true|false)',
+      caseSensitive: false,
+    ).allMatches(response).lastOrNull;
+    final confidenceMatch = RegExp(
+      r'["“]?confidence["”]?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)',
+      caseSensitive: false,
+    ).allMatches(response).lastOrNull;
+    if (triggerMatch == null && confidenceMatch == null) return null;
+    return _VisionDecision(
+      trigger: (triggerMatch?.group(1) ?? '').toLowerCase() == 'true',
+      confidence: _readConfidence(confidenceMatch?.group(1)),
+      action: _lastLooseStringField(response, 'action') ?? 'none',
+      summary: _lastLooseStringField(response, 'summary') ?? response.trim(),
+      command: _lastLooseStringField(response, 'command') ?? '',
+    );
+  }
+
+  String? _lastLooseStringField(String response, String field) {
+    final pattern = RegExp(
+      '["“]?$field["”]?\\s*[:：]\\s*["“]([^"”\\n\\r]*)["”]',
+      caseSensitive: false,
+    );
+    final matches = pattern.allMatches(response).toList();
+    if (matches.isEmpty) return null;
+    final value = matches.last.group(1)?.trim();
+    return value == null || value.isEmpty ? null : value;
   }
 
   Iterable<String> _jsonObjectCandidates(String response) sync* {
@@ -329,6 +419,166 @@ $triggers
     final parsed = double.tryParse(value?.toString() ?? '');
     if (parsed == null) return 0;
     return parsed;
+  }
+
+  _DurationGateResult _durationGate(
+    GlobalConfig config,
+    _VisionDecision decision,
+    ForegroundAppInfo app,
+  ) {
+    final requirements = _durationRequirements(config.proactiveVisionTriggers);
+    if (requirements.isEmpty) {
+      _resetContinuousHit();
+      return const _DurationGateResult.allowed();
+    }
+
+    final key = _durationHitKey(config, app);
+    final now = DateTime.now();
+    if (_continuousHitKey != key || _continuousHitStartedAt == null) {
+      _continuousHitKey = key;
+      _continuousHitStartedAt = now;
+    }
+    _continuousHitDecision = decision;
+    _continuousHitForegroundApp = app;
+
+    final elapsed = now.difference(_continuousHitStartedAt!);
+    final required = requirements
+        .map((item) => item.duration)
+        .reduce((a, b) => a < b ? a : b);
+    if (elapsed >= required) {
+      return _DurationGateResult.allowed();
+    }
+
+    return _DurationGateResult.blocked(
+      '主动视觉场景连续命中 ${_formatDuration(elapsed)}，未达到触发条件要求的 ${_formatDuration(required)}',
+    );
+  }
+
+  String? _durationWaitingMessage(GlobalConfig config) {
+    final startedAt = _continuousHitStartedAt;
+    if (startedAt == null) return null;
+    final requirements = _durationRequirements(config.proactiveVisionTriggers);
+    if (requirements.isEmpty) return null;
+    final required = requirements
+        .map((item) => item.duration)
+        .reduce((a, b) => a < b ? a : b);
+    final elapsed = DateTime.now().difference(startedAt);
+    if (elapsed >= required) {
+      return '主动视觉场景已连续命中 ${_formatDuration(elapsed)}，等待下一次画面变化复核后触发';
+    }
+    return '主动视觉场景连续命中 ${_formatDuration(elapsed)}，未达到 ${_formatDuration(required)}';
+  }
+
+  Future<bool> _maybeDispatchUnchangedDurationHit(GlobalConfig config) async {
+    final decision = _continuousHitDecision;
+    final app = _continuousHitForegroundApp;
+    if (decision == null || app == null || !decision.shouldTrigger) {
+      return false;
+    }
+    final gate = _durationGate(config, decision, app);
+    if (!gate.allowed) return false;
+    _log('主动视觉场景已达时长，画面未变，使用上一轮视觉判断触发：${decision.summary}');
+    await _dispatchTrigger(decision);
+    return true;
+  }
+
+  Future<bool> _maybeDispatchElapsedDurationHit(
+    GlobalConfig config,
+    ForegroundAppInfo app,
+  ) async {
+    final decision = _continuousHitDecision;
+    if (decision == null || !decision.shouldTrigger) return false;
+    if (!_hasActiveDurationHitFor(config, app)) return false;
+    final gate = _durationGate(config, decision, app);
+    if (!gate.allowed) return false;
+    _log('主动视觉场景已达时长，使用持续观察记录触发：${decision.summary}');
+    await _dispatchTrigger(decision);
+    return true;
+  }
+
+  bool _hasActiveDurationHitFor(GlobalConfig config, ForegroundAppInfo app) {
+    return _continuousHitStartedAt != null &&
+        _continuousHitDecision != null &&
+        _continuousHitKey == _durationHitKey(config, app);
+  }
+
+  void _resetContinuousHitIfForegroundChanged(
+    GlobalConfig config,
+    ForegroundAppInfo app,
+  ) {
+    if (_continuousHitStartedAt == null) return;
+    if (_continuousHitKey != _durationHitKey(config, app)) {
+      _resetContinuousHit();
+    }
+  }
+
+  List<_DurationRequirement> _durationRequirements(List<String> triggers) {
+    final result = <_DurationRequirement>[];
+    for (final trigger in triggers) {
+      final duration = _parseDurationRequirement(trigger);
+      if (duration != null) {
+        result.add(_DurationRequirement(trigger: trigger, duration: duration));
+      }
+    }
+    return result;
+  }
+
+  Duration? _parseDurationRequirement(String text) {
+    final patterns = [
+      RegExp(
+        r'(\d+(?:\.\d+)?)\s*(分钟|分|min|mins|minute|minutes)',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'(\d+(?:\.\d+)?)\s*(小时|个小时|h|hr|hrs|hour|hours)',
+        caseSensitive: false,
+      ),
+    ];
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(text);
+      if (match == null) continue;
+      final value = double.tryParse(match.group(1) ?? '');
+      final unit = match.group(2)?.toLowerCase() ?? '';
+      if (value == null || value <= 0) continue;
+      if (unit.contains('小') ||
+          unit == 'h' ||
+          unit.startsWith('hr') ||
+          unit.startsWith('hour')) {
+        return Duration(seconds: (value * 3600).round());
+      }
+      return Duration(seconds: (value * 60).round());
+    }
+    return null;
+  }
+
+  String _durationHitKey(GlobalConfig config, ForegroundAppInfo app) {
+    final appKey = app.bundleIdentifier.trim().isNotEmpty
+        ? app.bundleIdentifier.trim()
+        : app.name.trim();
+    final triggerKey = config.proactiveVisionTriggers
+        .map((trigger) => trigger.trim())
+        .where((trigger) => trigger.isNotEmpty)
+        .join('|')
+        .toLowerCase();
+    return '$appKey|$triggerKey';
+  }
+
+  void _resetContinuousHit() {
+    _continuousHitStartedAt = null;
+    _continuousHitKey = '';
+    _continuousHitDecision = null;
+    _continuousHitForegroundApp = null;
+  }
+
+  String _formatDuration(Duration duration) {
+    if (duration.inHours > 0) {
+      final minutes = duration.inMinutes.remainder(60);
+      return minutes == 0
+          ? '${duration.inHours}小时'
+          : '${duration.inHours}小时$minutes分钟';
+    }
+    if (duration.inMinutes > 0) return '${duration.inMinutes}分钟';
+    return '${duration.inSeconds}秒';
   }
 
   Future<void> _dispatchTrigger(_VisionDecision decision) async {
@@ -468,4 +718,23 @@ class _VisionDecision {
   bool get shouldTrigger =>
       trigger &&
       confidence >= ProactiveVisionWatcher._triggerConfidenceThreshold;
+}
+
+class _DurationRequirement {
+  final String trigger;
+  final Duration duration;
+
+  const _DurationRequirement({required this.trigger, required this.duration});
+}
+
+class _DurationGateResult {
+  final bool allowed;
+  final String message;
+
+  const _DurationGateResult._({required this.allowed, required this.message});
+
+  const _DurationGateResult.allowed() : this._(allowed: true, message: '');
+
+  const _DurationGateResult.blocked(String message)
+    : this._(allowed: false, message: message);
 }
