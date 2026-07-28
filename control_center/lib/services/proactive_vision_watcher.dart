@@ -39,10 +39,7 @@ class ProactiveVisionWatcher {
   bool _busy = false;
   int? _lastScreenSignature;
   DateTime? _lastSampleAt;
-  DateTime? _continuousHitStartedAt;
-  String _continuousHitKey = '';
-  _VisionDecision? _continuousHitDecision;
-  ForegroundAppInfo? _continuousHitForegroundApp;
+  final _durationStates = <String, _DurationHitState>{};
   String _lastMessage = '未启动';
   final _logs = <String>[];
   GlobalConfig? _config;
@@ -108,7 +105,7 @@ class ProactiveVisionWatcher {
     _timer = null;
     _running = false;
     _busy = false;
-    _resetContinuousHit();
+    _resetDurationStates();
     _lastMessage = '未启动';
     _emitState();
   }
@@ -172,7 +169,7 @@ class ProactiveVisionWatcher {
       final decision = _parseDecision(result.response);
       if (!decision.shouldTrigger) {
         if (!_hasActiveDurationHitFor(config, foreground)) {
-          _resetContinuousHit();
+          _resetDurationStatesForForeground(config, foreground);
         }
         _log(
           '主动视觉未触发：${decision.summary.isEmpty ? '模型未给出触发事件' : decision.summary}',
@@ -189,7 +186,9 @@ class ProactiveVisionWatcher {
         return;
       }
       _log('主动视觉持续条件已满足，准备唤醒 Jarvis');
-      await _dispatchTrigger(decision);
+      if (await _dispatchTrigger(decision)) {
+        _resetDurationState(gate.triggerKey);
+      }
     } catch (e) {
       _log('主动视觉本轮异常，静默跳过：$e');
     } finally {
@@ -251,6 +250,7 @@ $triggers
 请只返回 JSON，不要返回 Markdown：
 {
   "trigger": true 或 false,
+  "trigger_index": 命中的触发条件序号，从 1 开始；不确定时可省略,
   "confidence": 0.0 到 1.0,
   "action": "speak" 或 "agent_command" 或 "none",
   "summary": "用户正在……，因此满足……条件",
@@ -306,6 +306,7 @@ $triggers
     return _VisionDecision(
       trigger: decoded['trigger'] == true,
       confidence: _readConfidence(decoded['confidence']),
+      triggerIndex: _readTriggerIndex(decoded),
       action: decoded['action']?.toString() ?? 'none',
       summary: decoded['summary']?.toString() ?? '',
       command: decoded['command']?.toString() ?? '',
@@ -325,6 +326,7 @@ $triggers
     return _VisionDecision(
       trigger: (triggerMatch?.group(1) ?? '').toLowerCase() == 'true',
       confidence: _readConfidence(confidenceMatch?.group(1)),
+      triggerIndex: _readLooseTriggerIndex(response),
       action: _lastLooseStringField(response, 'action') ?? 'none',
       summary: _lastLooseStringField(response, 'summary') ?? response.trim(),
       command: _lastLooseStringField(response, 'command') ?? '',
@@ -421,106 +423,161 @@ $triggers
     return parsed;
   }
 
+  int? _readTriggerIndex(Map<String, dynamic> decoded) {
+    final value = decoded['trigger_index'] ?? decoded['triggerIndex'];
+    if (value is int) return value;
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  int? _readLooseTriggerIndex(String response) {
+    final match = RegExp(
+      r'["“]?(trigger_index|triggerIndex)["”]?\s*[:：]\s*([0-9]+)',
+      caseSensitive: false,
+    ).allMatches(response).lastOrNull;
+    return int.tryParse(match?.group(2) ?? '');
+  }
+
   _DurationGateResult _durationGate(
     GlobalConfig config,
     _VisionDecision decision,
     ForegroundAppInfo app,
   ) {
-    final requirements = _durationRequirements(config.proactiveVisionTriggers);
+    final requirements = _matchingDurationRequirements(config, decision);
     if (requirements.isEmpty) {
-      _resetContinuousHit();
       return const _DurationGateResult.allowed();
     }
 
-    final key = _durationHitKey(config, app);
     final now = DateTime.now();
-    if (_continuousHitKey != key || _continuousHitStartedAt == null) {
-      _continuousHitKey = key;
-      _continuousHitStartedAt = now;
+    _DurationRequirement? closestRequirement;
+    _DurationHitState? closestState;
+    Duration? closestRemaining;
+    for (final requirement in requirements) {
+      final key = _durationHitKey(requirement, app);
+      final state = _durationStates.putIfAbsent(
+        key,
+        () => _DurationHitState(startedAt: now),
+      );
+      state
+        ..decision = decision
+        ..foregroundApp = app
+        ..trigger = requirement.trigger;
+      final elapsed = now.difference(state.startedAt);
+      if (elapsed >= requirement.duration) {
+        return _DurationGateResult.allowed(triggerKey: key);
+      }
+      final remaining = requirement.duration - elapsed;
+      if (closestRemaining == null || remaining < closestRemaining) {
+        closestRemaining = remaining;
+        closestRequirement = requirement;
+        closestState = state;
+      }
     }
-    _continuousHitDecision = decision;
-    _continuousHitForegroundApp = app;
 
-    final elapsed = now.difference(_continuousHitStartedAt!);
-    final required = requirements
-        .map((item) => item.duration)
-        .reduce((a, b) => a < b ? a : b);
-    if (elapsed >= required) {
-      return _DurationGateResult.allowed();
-    }
-
+    final elapsed = now.difference(closestState!.startedAt);
     return _DurationGateResult.blocked(
-      '主动视觉场景连续命中 ${_formatDuration(elapsed)}，未达到触发条件要求的 ${_formatDuration(required)}',
+      '主动视觉场景「${closestRequirement!.trigger}」连续命中 ${_formatDuration(elapsed)}，未达到触发条件要求的 ${_formatDuration(closestRequirement.duration)}',
     );
   }
 
   String? _durationWaitingMessage(GlobalConfig config) {
-    final startedAt = _continuousHitStartedAt;
-    if (startedAt == null) return null;
-    final requirements = _durationRequirements(config.proactiveVisionTriggers);
-    if (requirements.isEmpty) return null;
-    final required = requirements
-        .map((item) => item.duration)
-        .reduce((a, b) => a < b ? a : b);
-    final elapsed = DateTime.now().difference(startedAt);
+    final active = _activeDurationStates(config);
+    if (active.isEmpty) return null;
+    final entry = active.first;
+    final elapsed = DateTime.now().difference(entry.value.startedAt);
+    final required = entry.key.duration;
     if (elapsed >= required) {
-      return '主动视觉场景已连续命中 ${_formatDuration(elapsed)}，等待下一次画面变化复核后触发';
+      return '主动视觉场景「${entry.key.trigger}」已连续命中 ${_formatDuration(elapsed)}，等待下一轮触发';
     }
-    return '主动视觉场景连续命中 ${_formatDuration(elapsed)}，未达到 ${_formatDuration(required)}';
+    return '主动视觉场景「${entry.key.trigger}」连续命中 ${_formatDuration(elapsed)}，未达到 ${_formatDuration(required)}';
   }
 
   Future<bool> _maybeDispatchUnchangedDurationHit(GlobalConfig config) async {
-    final decision = _continuousHitDecision;
-    final app = _continuousHitForegroundApp;
-    if (decision == null || app == null || !decision.shouldTrigger) {
-      return false;
-    }
-    final gate = _durationGate(config, decision, app);
-    if (!gate.allowed) return false;
-    _log('主动视觉场景已达时长，画面未变，使用上一轮视觉判断触发：${decision.summary}');
-    await _dispatchTrigger(decision);
-    return true;
+    return _maybeDispatchReadyDurationState(config, null);
   }
 
   Future<bool> _maybeDispatchElapsedDurationHit(
     GlobalConfig config,
     ForegroundAppInfo app,
   ) async {
-    final decision = _continuousHitDecision;
-    if (decision == null || !decision.shouldTrigger) return false;
-    if (!_hasActiveDurationHitFor(config, app)) return false;
-    final gate = _durationGate(config, decision, app);
-    if (!gate.allowed) return false;
-    _log('主动视觉场景已达时长，使用持续观察记录触发：${decision.summary}');
-    await _dispatchTrigger(decision);
-    return true;
+    return _maybeDispatchReadyDurationState(config, app);
+  }
+
+  Future<bool> _maybeDispatchReadyDurationState(
+    GlobalConfig config,
+    ForegroundAppInfo? app,
+  ) async {
+    final now = DateTime.now();
+    for (final requirement in _durationRequirements(
+      config.proactiveVisionTriggers,
+    )) {
+      final states = _durationStates.entries.where((entry) {
+        final state = entry.value;
+        if (state.trigger != requirement.trigger) return false;
+        final stateApp = state.foregroundApp;
+        if (stateApp == null || state.decision?.shouldTrigger != true) {
+          return false;
+        }
+        if (app != null && entry.key != _durationHitKey(requirement, app)) {
+          return false;
+        }
+        return now.difference(state.startedAt) >= requirement.duration;
+      }).toList();
+      if (states.isEmpty) continue;
+
+      final entry = states.first;
+      final decision = entry.value.decision!;
+      _log('主动视觉场景「${requirement.trigger}」已达时长，使用持续观察记录触发：${decision.summary}');
+      if (await _dispatchTrigger(decision)) {
+        _resetDurationState(entry.key);
+      }
+      return true;
+    }
+    return false;
   }
 
   bool _hasActiveDurationHitFor(GlobalConfig config, ForegroundAppInfo app) {
-    return _continuousHitStartedAt != null &&
-        _continuousHitDecision != null &&
-        _continuousHitKey == _durationHitKey(config, app);
+    return _durationRequirements(config.proactiveVisionTriggers).any(
+      (requirement) =>
+          _durationStates.containsKey(_durationHitKey(requirement, app)),
+    );
   }
 
   void _resetContinuousHitIfForegroundChanged(
     GlobalConfig config,
     ForegroundAppInfo app,
   ) {
-    if (_continuousHitStartedAt == null) return;
-    if (_continuousHitKey != _durationHitKey(config, app)) {
-      _resetContinuousHit();
-    }
+    _resetDurationStatesExceptForeground(config, app);
   }
 
   List<_DurationRequirement> _durationRequirements(List<String> triggers) {
     final result = <_DurationRequirement>[];
-    for (final trigger in triggers) {
+    for (var i = 0; i < triggers.length; i++) {
+      final trigger = triggers[i];
       final duration = _parseDurationRequirement(trigger);
       if (duration != null) {
-        result.add(_DurationRequirement(trigger: trigger, duration: duration));
+        result.add(
+          _DurationRequirement(
+            index: i + 1,
+            trigger: trigger,
+            duration: duration,
+          ),
+        );
       }
     }
     return result;
+  }
+
+  List<_DurationRequirement> _matchingDurationRequirements(
+    GlobalConfig config,
+    _VisionDecision decision,
+  ) {
+    final requirements = _durationRequirements(config.proactiveVisionTriggers);
+    final triggerIndex = decision.triggerIndex;
+    if (triggerIndex == null) return requirements;
+    final matched = requirements
+        .where((requirement) => requirement.index == triggerIndex)
+        .toList();
+    return matched.isEmpty ? requirements : matched;
   }
 
   Duration? _parseDurationRequirement(String text) {
@@ -551,23 +608,56 @@ $triggers
     return null;
   }
 
-  String _durationHitKey(GlobalConfig config, ForegroundAppInfo app) {
+  Iterable<MapEntry<_DurationRequirement, _DurationHitState>>
+  _activeDurationStates(GlobalConfig config) sync* {
+    for (final requirement in _durationRequirements(
+      config.proactiveVisionTriggers,
+    )) {
+      for (final entry in _durationStates.entries) {
+        if (entry.value.trigger == requirement.trigger) {
+          yield MapEntry(requirement, entry.value);
+        }
+      }
+    }
+  }
+
+  String _durationHitKey(
+    _DurationRequirement requirement,
+    ForegroundAppInfo app,
+  ) {
     final appKey = app.bundleIdentifier.trim().isNotEmpty
         ? app.bundleIdentifier.trim()
         : app.name.trim();
-    final triggerKey = config.proactiveVisionTriggers
-        .map((trigger) => trigger.trim())
-        .where((trigger) => trigger.isNotEmpty)
-        .join('|')
-        .toLowerCase();
+    final triggerKey = requirement.trigger.trim().toLowerCase();
     return '$appKey|$triggerKey';
   }
 
-  void _resetContinuousHit() {
-    _continuousHitStartedAt = null;
-    _continuousHitKey = '';
-    _continuousHitDecision = null;
-    _continuousHitForegroundApp = null;
+  void _resetDurationState(String key) {
+    _durationStates.remove(key);
+  }
+
+  void _resetDurationStates() {
+    _durationStates.clear();
+  }
+
+  void _resetDurationStatesForForeground(
+    GlobalConfig config,
+    ForegroundAppInfo app,
+  ) {
+    final keys = _durationRequirements(
+      config.proactiveVisionTriggers,
+    ).map((requirement) => _durationHitKey(requirement, app)).toSet();
+    _durationStates.removeWhere((key, _) => keys.contains(key));
+  }
+
+  void _resetDurationStatesExceptForeground(
+    GlobalConfig config,
+    ForegroundAppInfo app,
+  ) {
+    final keys = _durationRequirements(
+      config.proactiveVisionTriggers,
+    ).map((requirement) => _durationHitKey(requirement, app)).toSet();
+    _durationStates.removeWhere((key, _) => !keys.contains(key));
   }
 
   String _formatDuration(Duration duration) {
@@ -581,7 +671,7 @@ $triggers
     return '${duration.inSeconds}秒';
   }
 
-  Future<void> _dispatchTrigger(_VisionDecision decision) async {
+  Future<bool> _dispatchTrigger(_VisionDecision decision) async {
     final summary = decision.summary.trim().isEmpty
         ? '用户当前屏幕上可能有需要处理的事情，满足主动视觉触发条件。'
         : decision.summary.trim();
@@ -594,7 +684,7 @@ $triggers
       final token = await _readAssistantApiToken();
       if (token.isEmpty) {
         _log('主动视觉投递失败：语音助手 API token 不可用');
-        return;
+        return false;
       }
       final client = HttpClient();
       final request = await client
@@ -624,8 +714,10 @@ $triggers
             ? '主动视觉已真实唤醒 Jarvis 并投递指令'
             : '主动视觉投递失败：HTTP ${response.statusCode} ${responseText.trim()}',
       );
+      return response.statusCode == 200;
     } catch (_) {
       _log('主动视觉投递失败：语音助手 API 未连接');
+      return false;
     }
   }
 
@@ -693,6 +785,7 @@ bool _listEquals<T>(List<T> a, List<T> b) {
 class _VisionDecision {
   final bool trigger;
   final double confidence;
+  final int? triggerIndex;
   final String action;
   final String summary;
   final String command;
@@ -700,6 +793,7 @@ class _VisionDecision {
   const _VisionDecision({
     required this.trigger,
     required this.confidence,
+    this.triggerIndex,
     required this.action,
     required this.summary,
     required this.command,
@@ -709,6 +803,7 @@ class _VisionDecision {
     return _VisionDecision(
       trigger: false,
       confidence: 0,
+      triggerIndex: null,
       action: 'none',
       summary: summary.trim(),
       command: '',
@@ -721,20 +816,40 @@ class _VisionDecision {
 }
 
 class _DurationRequirement {
+  final int index;
   final String trigger;
   final Duration duration;
 
-  const _DurationRequirement({required this.trigger, required this.duration});
+  const _DurationRequirement({
+    required this.index,
+    required this.trigger,
+    required this.duration,
+  });
 }
 
 class _DurationGateResult {
   final bool allowed;
   final String message;
+  final String triggerKey;
 
-  const _DurationGateResult._({required this.allowed, required this.message});
+  const _DurationGateResult._({
+    required this.allowed,
+    required this.message,
+    required this.triggerKey,
+  });
 
-  const _DurationGateResult.allowed() : this._(allowed: true, message: '');
+  const _DurationGateResult.allowed({String triggerKey = ''})
+    : this._(allowed: true, message: '', triggerKey: triggerKey);
 
   const _DurationGateResult.blocked(String message)
-    : this._(allowed: false, message: message);
+    : this._(allowed: false, message: message, triggerKey: '');
+}
+
+class _DurationHitState {
+  final DateTime startedAt;
+  String trigger = '';
+  _VisionDecision? decision;
+  ForegroundAppInfo? foregroundApp;
+
+  _DurationHitState({required this.startedAt});
 }
