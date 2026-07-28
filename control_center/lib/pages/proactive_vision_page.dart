@@ -33,7 +33,6 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
   final _appSelectionFilterNotifier = ValueNotifier<_AppSelectionFilter>(
     _AppSelectionFilter.all,
   );
-  final _formRevision = ValueNotifier<int>(0);
 
   GlobalConfig? _config;
   GlobalConfig? _savedConfig;
@@ -47,6 +46,8 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
   bool _saving = false;
   bool _checking = false;
   bool _enabled = false;
+  bool _allowPop = false;
+  bool _confirmingLeave = false;
 
   @override
   void initState() {
@@ -72,7 +73,6 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
     _appsExpandedNotifier.dispose();
     _ignoredAppsRevision.dispose();
     _appSelectionFilterNotifier.dispose();
-    _formRevision.dispose();
     _ollamaUrlController.dispose();
     _modelController.dispose();
     _promptController.dispose();
@@ -85,7 +85,7 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
   }
 
   void _onFormTextChanged() {
-    _formRevision.value += 1;
+    if (mounted) setState(() {});
   }
 
   void _onAppSearchChanged() {
@@ -115,10 +115,10 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
       if (!mounted) return;
       setState(() {
         _config = config;
-        _savedConfig = config;
         _installedApps = apps;
         _ignoredApps = config.proactiveVisionIgnoredApps.toSet();
         _enabled = config.proactiveVisionEnabled;
+        _savedConfig = _currentConfig;
         _loading = false;
       });
       await _checkStatus();
@@ -214,32 +214,46 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
 
   Future<bool> _confirmLeave() async {
     if (!_hasUnsavedChanges) return true;
-    final action = await showDialog<_LeaveAction>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('保存更改？'),
-        content: const Text('主动视觉配置有未保存的更改，离开前是否保存？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, _LeaveAction.cancel),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, _LeaveAction.discard),
-            child: const Text('不保存'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, _LeaveAction.save),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    if (action == _LeaveAction.save) {
-      await _save();
-      return !_hasUnsavedChanges;
+    if (_confirmingLeave) return false;
+    _confirmingLeave = true;
+    try {
+      final action = await showDialog<_LeaveAction>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('保存更改？'),
+          content: const Text('主动视觉配置有未保存的更改，离开前是否保存？'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, _LeaveAction.cancel),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, _LeaveAction.discard),
+              child: const Text('不保存'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, _LeaveAction.save),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      );
+      if (action == _LeaveAction.save) {
+        await _save();
+        return !_hasUnsavedChanges;
+      }
+      return action == _LeaveAction.discard;
+    } finally {
+      _confirmingLeave = false;
     }
-    return action == _LeaveAction.discard;
+  }
+
+  void _leavePage() {
+    if (!mounted) return;
+    setState(() => _allowPop = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop();
+    });
   }
 
   String get _ollamaUrl {
@@ -300,12 +314,14 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
   void _toggleIgnoredApp(InstalledApplicationInfo app, bool selected) {
     final key = _appIgnoreKey(app);
     if (key.isEmpty) return;
-    if (selected) {
-      _ignoredApps.add(key);
-    } else {
-      _ignoredApps.remove(key);
-    }
-    _ignoredAppsRevision.value += 1;
+    setState(() {
+      if (selected) {
+        _ignoredApps.add(key);
+      } else {
+        _ignoredApps.remove(key);
+      }
+      _ignoredAppsRevision.value += 1;
+    });
   }
 
   TextEditingController _createTriggerController(String text) {
@@ -348,13 +364,12 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: !_hasUnsavedChanges,
+      canPop: _allowPop || !_hasUnsavedChanges,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        final navigator = Navigator.of(context);
         final shouldLeave = await _confirmLeave();
         if (!mounted || !shouldLeave) return;
-        navigator.pop();
+        _leavePage();
       },
       child: Scaffold(
         appBar: AppBar(
@@ -564,7 +579,7 @@ class _ProactiveVisionPageState extends State<ProactiveVisionPage> {
               decoration: const InputDecoration(
                 labelText: '主动视觉提示词模板',
                 prefixIcon: Icon(Icons.chat_bubble_outline),
-                helperText: '运行时会动态注入当前时间、前台 App 和各场景连续命中状态。',
+                helperText: '系统判定协议，不懂别乱改。运行时会动态注入当前时间、前台 App 和场景命中记录。',
               ),
             ),
             const SizedBox(height: 12),
