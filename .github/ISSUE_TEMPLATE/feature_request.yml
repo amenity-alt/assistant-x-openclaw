@@ -1,0 +1,56 @@
+name: 功能建议
+description: 提交新功能、优化或改进建议
+title: "[Feature] "
+labels:
+  - enhancement
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你的建议。请重点说明使用场景，而不只是描述希望增加什么按钮。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景或现有问题
+      description: 你在什么场景下遇到了什么困难？
+      placeholder: 当我……时，目前只能……，因此……
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 建议方案
+      description: 你希望项目如何解决这个问题？
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案
+      description: 你是否尝试过其他解决方式？
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 重要程度
+      options:
+        - 锦上添花
+        - 比较重要
+        - 严重影响使用
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索过现有 Issues，没有发现相同建议。
+          required: true
+        - label: 这项建议与本项目的功能范围有关。
+          required: true
