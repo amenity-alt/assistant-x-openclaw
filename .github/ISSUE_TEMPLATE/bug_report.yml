@@ -1,5 +1,5 @@
 name: Bug 反馈
-description: 报告可复现的问题或异常行为
+description: 报告可稳定复现的问题、异常行为或功能退化
 title: "[Bug] "
 labels:
   - bug
@@ -9,27 +9,89 @@ body:
   - type: markdown
     attributes:
       value: |
-        感谢你提交 Bug。请尽可能完整地填写以下信息。
+        感谢你帮助改进项目。高质量的复现信息可以显著缩短定位时间。
+
+        > **安全提示：**请勿公开提交密码、API Key、Token、Cookie、设备标识、声纹或其他隐私数据。安全漏洞请通过 GitHub Security Advisory 私下报告。
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: 提交前检查
+      options:
+        - label: 我已搜索现有 Issues，确认没有相同或高度相似的问题。
+          required: true
+        - label: 我已阅读相关文档，并确认这不是已说明的限制或预期行为。
+          required: true
 
   - type: textarea
-    id: description
+    id: summary
     attributes:
-      label: 问题描述
-      description: 请清晰描述你遇到的问题。
-      placeholder: 实际发生了什么？
+      label: 问题概述
+      description: 请简洁说明实际发生的异常、影响范围，以及问题出现的时间点。
+      placeholder: 在……场景下执行……后，系统出现……，导致……
+    validations:
+      required: true
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: 涉及模块
+      description: 请选择所有可能相关的模块；不确定时可选择“其他或不确定”。
+      multiple: true
+      options:
+        - 安装、启动或依赖
+        - 配置文件
+        - 麦克风或音频采集
+        - 唤醒词（KWS）
+        - 语音活动检测（VAD）
+        - 语音识别（ASR）
+        - Agent、路由或工具调用
+        - 语音合成或播放（TTS）
+        - 打断、回声消除或全双工
+        - 悬浮层或 Control Center
+        - 其他或不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 请填写可用于复现的版本与环境信息；不知道的项目可填写“不确定”。
+      value: |
+        - 项目版本、分支或 Commit：
+        - 安装或运行方式：
+        - 操作系统及版本：
+        - CPU 架构（Intel / Apple Silicon / x86_64 / ARM64）：
+        - 主脑引擎（OpenClaw / Hermes / Edwin）：
+        - ASR / TTS 配置：
+        - 音频设备（如相关）：
     validations:
       required: true
 
   - type: textarea
     id: reproduce
     attributes:
-      label: 复现步骤
-      description: 请提供能够稳定复现问题的步骤。
+      label: 最小复现步骤
+      description: 请从干净启动开始，提供能够稳定触发问题的最少步骤，并注明关键配置或输入内容。
       placeholder: |
-        1. 打开……
-        2. 点击……
-        3. 执行……
-        4. 出现……
+        1. 使用配置……启动项目
+        2. 说出或执行……
+        3. 等待……
+        4. 观察到……
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: 复现频率
+      options:
+        - 每次都能复现
+        - 经常复现（超过 50%）
+        - 偶尔复现（低于 50%）
+        - 仅复现过一次
+        - 暂时无法再次复现
     validations:
       required: true
 
@@ -37,59 +99,42 @@ body:
     id: expected
     attributes:
       label: 预期行为
-      description: 你认为正确的行为应该是什么？
-    validations:
-      required: true
-
-  - type: textarea
-    id: actual
-    attributes:
-      label: 实际行为
-      description: 实际发生了什么？
-    validations:
-      required: true
-
-  - type: input
-    id: version
-    attributes:
-      label: 项目版本
-      placeholder: 例如 v1.2.0
+      description: 请说明在相同步骤下，系统正确的状态、输出或交互应该是什么。
     validations:
       required: true
 
   - type: dropdown
-    id: os
+    id: regression
     attributes:
-      label: 操作系统
+      label: 是否属于功能退化
+      description: 该功能是否曾在旧版本、旧提交或其他环境中正常工作？
       options:
-        - macOS
-        - Windows
-        - Linux
-        - Android
-        - iOS
-        - 其他
+        - 是，旧版本或旧提交中正常
+        - 否，从未正常工作
+        - 不确定
     validations:
       required: true
 
   - type: textarea
     id: logs
     attributes:
-      label: 日志或错误信息
-      description: 请粘贴相关日志，并注意删除密钥、Token 等敏感信息。
+      label: 相关日志
+      description: 请粘贴从启动到问题出现期间的关键日志和完整错误栈；无需添加代码围栏。提交前请务必脱敏。
+      placeholder: 在此粘贴已脱敏的日志或错误栈
       render: shell
 
   - type: textarea
     id: additional
     attributes:
-      label: 补充信息
-      description: 可以提供截图、录屏、配置文件或其他上下文。
+      label: 补充材料
+      description: 可拖入截图、录屏、音频样本，或提供最小配置、相关 Issue/PR 链接及其他定位线索。请勿上传隐私或敏感数据。
 
   - type: checkboxes
-    id: checks
+    id: privacy
     attributes:
-      label: 提交前确认
+      label: 隐私与真实性确认
       options:
-        - label: 我已经搜索过现有 Issues，没有发现重复问题。
+        - label: 我已删除日志和附件中的密码、Token、Cookie、设备标识及其他敏感信息。
           required: true
-        - label: 我已经删除日志中的密码、Token 等敏感信息。
+        - label: 以上内容基于实际测试结果；无法确认的部分已明确标注。
           required: true
