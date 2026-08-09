@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import random
+import re
 import signal
 import sys
 import time
@@ -384,7 +385,7 @@ def _extract_embedding(extractor, samples, sample_rate=16000):
         return None
 
 
-def _verify_speaker(extractor, manager, samples, sample_rate=16000):
+def _verify_speaker(extractor, manager, samples, sample_rate=16000, threshold=None):
     """验证说话人身份
     
     Returns:
@@ -402,8 +403,9 @@ def _verify_speaker(extractor, manager, samples, sample_rate=16000):
         emb_list = embedding.tolist()
         print(f"[声纹调试] 嵌入向量前5值: {emb_list[:5]}")
         print(f"[声纹调试] 已注册声纹: {manager.all_speakers}")
-        result = manager.search(emb_list, _SPEAKER_THRESHOLD)
-        print(f"[声纹调试] search result: '{result}', threshold: {_SPEAKER_THRESHOLD}")
+        thr = _SPEAKER_THRESHOLD if threshold is None else threshold
+        result = manager.search(emb_list, thr)
+        print(f"[声纹调试] search result: '{result}', threshold: {thr}")
         if result:
             # 计算相似度分数
             score = manager.score(result, emb_list)
@@ -597,6 +599,7 @@ class VoiceAssistant:
         self.last_activity_time = time.time()
         self._wake_audio_buffer = []  # 用于声纹验证的音频缓冲区
         self._wake_buffer_max_samples = int(self._asr_rate * 3)  # 最多存3秒（16kHz）
+        self._wake_verify_max_samples = int(self._asr_rate * 1.2)  # 打断验证取最近1.2秒
         self._prev_dnd_mode = False  # 上一轮勿扰状态，用于检测 DND 解除瞬间清流
 
         # VAD 前置缓存（用于待机时轻量级语音检测）
@@ -829,8 +832,13 @@ class VoiceAssistant:
                 print("[VAD] VAD 配置创建失败: {}".format(e2))
                 self.vad_config = None
 
-    def _verify_speaker_on_wake(self, samples, sample_rate=16000):
-        """唤醒时验证声纹
+    def _verify_speaker_on_wake(self, samples, sample_rate=16000, threshold=None):
+        """唤醒/打断时验证声纹
+
+        threshold: 相似度阈值，None 用全局 _SPEAKER_THRESHOLD（0.55）。
+        打断场景传更低阈值（如 0.40）：TTS 混音会稀释声纹特征，降低阈值
+        提高真人在播报中打断的通过率，同时纯 TTS 回声（实测相似度 0.00）
+        仍会被可靠拒绝。
         
         Returns:
             bool: 验证是否通过
@@ -862,7 +870,18 @@ class VoiceAssistant:
             return True
         
         is_verified, speaker_name, score = _verify_speaker(
-            self._speaker_extractor, self._speaker_manager, samples, sample_rate
+            self._speaker_extractor,
+            self._speaker_manager,
+            samples,
+            sample_rate,
+            threshold,
+        )
+        _diag.info(
+            "[声纹] threshold=%s verified=%s name=%s score=%.3f",
+            threshold if threshold is not None else _SPEAKER_THRESHOLD,
+            is_verified,
+            speaker_name,
+            score,
         )
 
         if is_verified:
@@ -1403,7 +1422,8 @@ class VoiceAssistant:
         """音频回调函数"""
         if status:
             print(status)
-        # 始终入队音频，保证处理期间（含TTS播报）也能检测唤醒词打断
+        # 播放期间也持续入队，保证能用唤醒词打断播报。自身播报被麦克风重新
+        # 拾取引发的自唤醒，由打断路径的 VAD + 声纹验证拦截（见 _is_processing 分支）。
         if self.audio_queue.qsize() < 100:
             self.audio_queue.put(indata.copy())
 
@@ -1550,15 +1570,65 @@ class VoiceAssistant:
                     self.last_activity_time = time.time()
                     samples = audio_data.reshape(-1)
                     asr_samples = self._resample_for_asr(samples)
+
+                    # 滚动缓冲最近音频（复用待机唤醒的声纹缓冲），打断时取末尾窗口验证
+                    self._wake_audio_buffer.append(asr_samples.tolist())
+                    _buf_len = sum(len(b) for b in self._wake_audio_buffer)
+                    while _buf_len > self._wake_buffer_max_samples:
+                        _removed = self._wake_audio_buffer.pop(0)
+                        _buf_len -= len(_removed)
+
+                    # VAD 预检测：有真实语音才考虑打断候选（抑制环境噪音误触发）
+                    _vad_has_speech = False
+                    if vad_stream is not None:
+                        vad_stream.accept_waveform(asr_samples)
+                        if vad_stream.is_speech_detected():
+                            _vad_has_speech = True
+
                     keyword_stream.accept_waveform(self._asr_rate, asr_samples)
 
                     while self.keyword_spotter.is_ready(keyword_stream):
                         self.keyword_spotter.decode_stream(keyword_stream)
                         kw_result = self.keyword_spotter.get_result(keyword_stream)
                         if kw_result:
+                            _diag.info(
+                                "[打断] 处理中 KWS 触发 kw=%s vad=%s",
+                                kw_result,
+                                _vad_has_speech,
+                            )
                             detected_id = self._detect_assistant_from_keyword(kw_result)
                             if detected_id != self.current_cfg["id"]:
                                 continue
+
+                            # VAD 过滤：无语音不打断
+                            if vad_stream is not None and not _vad_has_speech:
+                                self.keyword_spotter.reset_stream(keyword_stream)
+                                keyword_stream = self.keyword_spotter.create_stream()
+                                continue
+
+                            # 声纹验证：只放行注册用户。Jarvis 自身播报被麦克风重新
+                            # 拾取触发唤醒词时，末尾窗口是合成音 → 验证失败 → 忽略，
+                            # 避免"自己打断自己"造成复读死循环。
+                            if self._speaker_enabled:
+                                _int_samples = []
+                                for _b in self._wake_audio_buffer:
+                                    _int_samples.extend(_b)
+                                _int_samples = _int_samples[-self._wake_verify_max_samples:]
+                                # 打断用更低阈值（0.40）：TTS 混音会稀释声纹，
+                                # 实测纯 TTS 相似度 0.00，仍可拒绝回声。
+                                if not self._verify_speaker_on_wake(
+                                    _int_samples,
+                                    self._asr_rate,
+                                    threshold=0.40,
+                                ):
+                                    print(
+                                        f"\n[打断] 唤醒词 {kw_result} 未通过声纹验证，"
+                                        "忽略（疑似自身播报）"
+                                    )
+                                    self.keyword_spotter.reset_stream(keyword_stream)
+                                    keyword_stream = self.keyword_spotter.create_stream()
+                                    continue
+
                             print(f"\n[打断] 检测到唤醒词: {kw_result}")
                             # 打断整个处理流程：停止TTS + 中断OpenClaw
                             stop_tts()
@@ -1574,6 +1644,12 @@ class VoiceAssistant:
                             recognition_result = ""
                             self.keyword_spotter.reset_stream(keyword_stream)
                             keyword_stream = self.keyword_spotter.create_stream()
+                            self._wake_audio_buffer.clear()
+                            # 英文口头确认（打断成功），播放期间抑制识别避免误收自身确认音
+                            self._suppress_recognition_until_tts_done = True
+                            threading.Thread(
+                                target=self._play_interrupt_ack, daemon=True
+                            ).start()
                             print("\n请说出指令...")
                             break
 
@@ -2040,6 +2116,76 @@ class VoiceAssistant:
         # 同样记录打断时间，防止误触发退出检测
         self._last_interrupt_time = time.time()
 
+    def _current_lang(self) -> str:
+        """当前角色的固定回复语言（Sir 制定）：贾维斯一律英文，林妹妹一律中文。"""
+        if self.current_cfg.get("id") == "lin-meimei":
+            return "zh"
+        return "en"
+
+    def _wake_greeting(self) -> str:
+        """本地生成唤醒问候（不经大模型），语言跟随角色。
+
+        林妹妹 → 中文古风；贾维斯 → 英文。
+
+        长会话下大模型可能被历史中文语境带偏回中文，且唤醒时还会自动
+        跑工具（查时间/系统状态）拖慢响应。本地按时间段轮换英文问候，
+        保证唤醒始终是英文、即时可播。
+        """
+        if self._current_lang() == "zh":
+            return random.choice(
+                [
+                    "哟，这会子才想起我来，我还以为哥哥早把我给忘了呢。",
+                    "哥哥可算来了，妹妹在这儿候了许久了。",
+                    "妹妹在呢，哥哥有何吩咐？",
+                ]
+            )
+        hour = time.localtime().tm_hour
+        if 5 <= hour < 12:
+            period = "morning"
+        elif 12 <= hour < 18:
+            period = "afternoon"
+        else:
+            period = "evening"
+        variants = {
+            "morning": [
+                "Good morning, sir. All systems are online and ready.",
+                "Good morning, sir. A quiet start to the day. How can I help?",
+                "Good morning, sir. Everything is running smoothly, as always.",
+            ],
+            "afternoon": [
+                "Good afternoon, sir. All quiet on my end. How may I assist?",
+                "Good afternoon, sir. Systems are nominal. What do you need?",
+                "Good afternoon, sir. Nothing urgent has crossed my desk.",
+            ],
+            "evening": [
+                "Good evening, sir. All quiet up here. How was your day?",
+                "Good evening, sir. Everything is in order. How can I help?",
+                "Good evening, sir. All systems are nominal. What can I do for you?",
+            ],
+        }
+        # 按分钟轮换，避免每次唤醒都是同一句
+        return variants[period][int(time.time()) // 60 % len(variants[period])]
+
+    def _play_interrupt_ack(self):
+        """打断成功的英文口头确认（Yes, sir?）。播放期间抑制识别，
+        避免确认音被麦克风拾取后当作新指令又发回引擎（回声）。
+        """
+        try:
+            from tts import _tts_playing
+
+            _tts_playing.set()
+            from audio import play_array
+
+            result = self.tts.synthesize_to_array("Yes, sir?")
+            if result:
+                audio_data, sr = result
+                play_array(audio_data, sr, volume=1.5, blocking=True)
+        except Exception as e:
+            print(f"[打断] 确认音播放失败: {e}")
+        finally:
+            _tts_playing.clear()
+            self._suppress_recognition_until_tts_done = False
+
     def _clear_openclaw_context(self):
         """退下时通知 OpenClaw 清空会话上下文（异步，不阻塞）"""
         try:
@@ -2051,6 +2197,21 @@ class VoiceAssistant:
     def _on_recognized(self, text: str):
         """识别结果 → 发送给 OpenClaw → 整体合成播报回复"""
         print(f"\n[→ OpenClaw] {text}")
+
+        # 语言策略（Sir 制定）：贾维斯一律英文，林妹妹一律中文，不再跟随
+        # 用户语言或历史上下文。模型会习惯性镜像用户语言，需在每条消息里
+        # 显式指示才可靠。
+        if not text.startswith("voice-assistant-wake-up-"):
+            if self._current_lang() == "zh":
+                text = (
+                    f"{text}\n\n"
+                    "(你是林妹妹，一律用中文回复，绝不使用英文。)"
+                )
+            else:
+                text = (
+                    f"{text}\n\n"
+                    "(You are JARVIS, always reply in English, never in Chinese.)"
+                )
 
         # 在发送给 OpenClaw 之前的一瞬间，还原特效大小
         self.visual.reset_speaking_scale()
@@ -2237,12 +2398,21 @@ class VoiceAssistant:
                         self._waiting_active.clear()
 
                 try:
-                    reply = self.openclaw.send_and_wait_stream(
-                        text,
-                        on_chunk=_on_stream_chunk,
-                        on_start=_on_stream_start,
-                        on_end=_on_stream_end,
-                    )
+                    if text.startswith("voice-assistant-wake-up-"):
+                        # 唤醒问候本地生成（英文），不经过大模型：长会话下模型
+                        # 可能回中文、还会自动跑工具拖慢响应。直接喂给 TTS 流水线。
+                        _wake_reply = self._wake_greeting()
+                        _on_stream_start()
+                        _on_stream_chunk(_wake_reply)
+                        _on_stream_end()
+                        reply = _wake_reply
+                    else:
+                        reply = self.openclaw.send_and_wait_stream(
+                            text,
+                            on_chunk=_on_stream_chunk,
+                            on_start=_on_stream_start,
+                            on_end=_on_stream_end,
+                        )
                     self._waiting_active.clear()
                     waiting_thread.join(timeout=0.5)
                     result_queue.put(("success", reply))

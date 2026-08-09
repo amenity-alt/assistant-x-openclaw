@@ -295,7 +295,12 @@ def _generate_with_pauses(tts, text: str, speed: float, sid: int = 0,
     if not all_audio or sample_rate is None:
         return None
 
-    return (np.concatenate(all_audio), sample_rate)
+    audio = np.concatenate(all_audio)
+    # 峰值归一化到 0.6，与贾维斯 MeloTTS 中文一致，避免外放偏小
+    peak = np.max(np.abs(audio)) if len(audio) else 0.0
+    if peak > 1e-6:
+        audio = audio * (0.6 / peak)
+    return (audio, sample_rate)
 
 
 def synthesize(text: str, output_path: str = None, speed: float = 0.85) -> str | None:

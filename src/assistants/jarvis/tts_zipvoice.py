@@ -23,9 +23,18 @@ ZIPVOICE_DIR = os.path.join(
 )
 VOCODER = os.path.join(_PROJECT_DIR, "models", "vocos_24khz.onnx")
 REF_AUDIO = os.path.join(_PROJECT_DIR, "data", "voices", "jarvis_start_up.mp3")
-REF_TEXT = "Allow me to introduce myself I am jarvis, a virtual artificial intelligence importing all preferences from home interface systems are now fully operational."
+REF_TEXT = "Allow me to introduce myself. I am jarvis, a virtual artificial intelligence. Importing all preferences from home interface systems. Are now fully operational."
+
+# 干净参考音频缓存：用 Piper 放慢合成同一段 REF_TEXT，避免用带音效的
+# jarvis_start_up.mp3 当参考（会丢字、语速失控），合成后缓存成 wav 复用。
+REFERENCE_CACHE = os.path.join(_PROJECT_DIR, "data", "voices", "jarvis_zipvoice_ref.wav")
+
+# 下游播放统一按约 1.5 倍增益（main.py play_array / sd.play volume=1.5）。
+# ZipVoice 输出峰值可能接近满幅，先缩到 0.6，×1.5 后 ≈0.9 不削波。
+_TARGET_PEAK = 0.6
 
 _tts = None
+_tts_lock = threading.Lock()
 
 
 def _create_tts():
@@ -33,39 +42,97 @@ def _create_tts():
     if _tts is not None:
         return _tts
 
-    tts_config = sherpa_onnx.OfflineTtsConfig(
-        model=sherpa_onnx.OfflineTtsModelConfig(
-            zipvoice=sherpa_onnx.OfflineTtsZipvoiceModelConfig(
-                tokens=f"{ZIPVOICE_DIR}/tokens.txt",
-                encoder=f"{ZIPVOICE_DIR}/encoder.int8.onnx",
-                decoder=f"{ZIPVOICE_DIR}/decoder.int8.onnx",
-                data_dir=f"{ZIPVOICE_DIR}/espeak-ng-data",
-                lexicon=f"{ZIPVOICE_DIR}/lexicon.txt",
-                vocoder=VOCODER,
-            ),
-            debug=False,
-            num_threads=6,
-            provider="cpu",
+    with _tts_lock:
+        if _tts is not None:
+            return _tts
+
+        tts_config = sherpa_onnx.OfflineTtsConfig(
+            model=sherpa_onnx.OfflineTtsModelConfig(
+                zipvoice=sherpa_onnx.OfflineTtsZipvoiceModelConfig(
+                    tokens=f"{ZIPVOICE_DIR}/tokens.txt",
+                    encoder=f"{ZIPVOICE_DIR}/encoder.int8.onnx",
+                    decoder=f"{ZIPVOICE_DIR}/decoder.int8.onnx",
+                    data_dir=f"{ZIPVOICE_DIR}/espeak-ng-data",
+                    lexicon=f"{ZIPVOICE_DIR}/lexicon.txt",
+                    vocoder=VOCODER,
+                ),
+                debug=False,
+                num_threads=6,
+                provider="cpu",
+            )
         )
-    )
 
-    if not tts_config.validate():
-        raise ValueError("ZipVoice 配置验证失败")
+        if not tts_config.validate():
+            raise ValueError("ZipVoice 配置验证失败")
 
-    _tts = sherpa_onnx.OfflineTts(tts_config)
-    return _tts
+        _tts = sherpa_onnx.OfflineTts(tts_config)
+        return _tts
 
 
 _ref_audio_cache = None
+_ref_lock = threading.Lock()
+
+
+def _build_clean_reference() -> str | None:
+    """用 Piper 干净合成 Jarvis 参考语，供 ZipVoice 克隆声音。
+
+    Piper 合成音比真人录音更平稳，直接当参考会让克隆输出的语速过快
+    （约 12 字/秒），用 length_scale=2.5 放慢参考后输出约 5 字/秒，
+    接近自然中文语速。生成一次后缓存为 wav，之后直接复用。
+    """
+    try:
+        from piper import PiperVoice, SynthesisConfig
+
+        from assistants.jarvis import tts_piper
+        if not tts_piper.is_available():
+            return None
+        voice = PiperVoice.load(
+            tts_piper.MODEL_PATH, config_path=tts_piper.CONFIG_PATH
+        )
+        chunks = list(
+            voice.synthesize(REF_TEXT, SynthesisConfig(length_scale=2.5))
+        )
+        audio = np.concatenate(
+            [c.audio_int16_array for c in chunks]
+        ).astype(np.float32) / 32768.0
+        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+        if peak > 1e-6:
+            audio = audio / peak
+        audio32 = librosa.resample(
+            audio, orig_sr=voice.config.sample_rate, target_sr=32000
+        )
+        os.makedirs(os.path.dirname(REFERENCE_CACHE), exist_ok=True)
+        sf.write(REFERENCE_CACHE, audio32, 32000)
+        logger.info("ZipVoice 干净参考音频已生成: %s", REFERENCE_CACHE)
+        return REFERENCE_CACHE
+    except Exception as e:
+        logger.warning(f"生成 ZipVoice 干净参考音频失败，回退旧音效: {e}")
+        return None
 
 
 def _get_ref_audio():
     global _ref_audio_cache
     if _ref_audio_cache is not None:
         return _ref_audio_cache
-    ref_audio, ref_sr = librosa.load(REF_AUDIO, sr=32000)
-    _ref_audio_cache = (ref_audio, ref_sr)
-    return _ref_audio_cache
+    with _ref_lock:
+        if _ref_audio_cache is not None:
+            return _ref_audio_cache
+        path = REFERENCE_CACHE if os.path.isfile(REFERENCE_CACHE) else _build_clean_reference()
+        if not path or not os.path.isfile(path):
+            path = REF_AUDIO
+        ref_audio, ref_sr = librosa.load(path, sr=32000)
+        _ref_audio_cache = (ref_audio, ref_sr)
+        return _ref_audio_cache
+
+
+def _normalize_headroom(audio: np.ndarray) -> np.ndarray:
+    """峰值归一化到 _TARGET_PEAK，为下游 1.5 倍播放增益预留空间。"""
+    if len(audio) == 0:
+        return audio
+    peak = float(np.max(np.abs(audio)))
+    if peak > 1e-6:
+        audio = audio * (_TARGET_PEAK / peak)
+    return audio.astype(np.float32)
 
 
 def is_available():
@@ -137,6 +204,7 @@ def synthesize(text: str, output_path: str = None, retry: bool = True, num_steps
 
         audio_array = np.array(audio.samples, dtype=np.float32)
         trimmed_audio = _trim_silence(audio_array, audio.sample_rate)
+        trimmed_audio = _normalize_headroom(trimmed_audio)
 
         actual_duration = len(trimmed_audio) / audio.sample_rate
         expected_min_duration = _estimate_duration(text)
@@ -182,6 +250,7 @@ def synthesize_to_array(text: str, num_steps: int = 10, retry: bool = True) -> t
 
         audio_array = np.array(result.samples, dtype=np.float32)
         trimmed_audio = _trim_silence(audio_array, result.sample_rate)
+        trimmed_audio = _normalize_headroom(trimmed_audio)
 
         actual_duration = len(trimmed_audio) / result.sample_rate
         expected_min_duration = _estimate_duration(text)
@@ -236,6 +305,7 @@ def synthesize_streaming(text: str, stop_event: threading.Event = None, volume: 
 
         audio_data = np.array(result.samples, dtype=np.float32)
         audio_data = _trim_silence(audio_data, result.sample_rate)
+        audio_data = _normalize_headroom(audio_data)
 
         if len(audio_data) == 0:
             return False

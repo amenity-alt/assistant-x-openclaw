@@ -147,13 +147,23 @@ def setup_logging(project_dir, keep=15):
     root.addHandler(file_handler)
     atexit.register(file_handler.close)
 
-    # diag logger 沿用同一份 error 文件（propagate=False，仍只落盘不进控制中心）。
-    # 仅 .error()/.exception() 会写入，.info()/.warning() 一律忽略。
+    # diag logger 独立落盘（propagate=False，只进文件不进控制中心）。
+    # info/warning/error 全量写入，用于排查打断/卡顿等现场日志。
     diag = logging.getLogger(DIAG_LOGGER_NAME)
-    diag.setLevel(logging.ERROR)
+    diag.setLevel(logging.INFO)
     diag.handlers.clear()
-    diag.addHandler(file_handler)
+    diag_path = os.path.join(logs_dir, f"jarvis_diag_{ts}_{os.getpid()}.log")
+    diag_handler = logging.FileHandler(diag_path, encoding="utf-8")
+    diag_handler.setLevel(logging.INFO)
+    diag_handler.setFormatter(
+        logging.Formatter(
+            "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    diag.addHandler(diag_handler)
     diag.propagate = False
+    atexit.register(diag_handler.close)
 
     # 未捕获异常也写进 error 文件，避免崩溃信息只出现在终端
     def _log_uncaught(exc_type, exc, tb):

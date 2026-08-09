@@ -1,0 +1,39 @@
+name: Build Overlay (macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/chat-panel-merged
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.9'
+          cache: true
+
+      - name: Pub get
+        working-directory: assistant_overlay
+        run: flutter pub get
+
+      - name: Build macOS release
+        working-directory: assistant_overlay
+        run: flutter build macos --release
+
+      - name: Package app
+        working-directory: assistant_overlay/build/macos/Build/Products/Release
+        run: ditto -c -k --sequesterRsrc --keepParent assistant_overlay.app assistant_overlay.app.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: assistant-overlay-macos
+          path: assistant_overlay/build/macos/Build/Products/Release/assistant_overlay.app.zip
+          retention-days: 7

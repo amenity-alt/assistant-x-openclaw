@@ -394,13 +394,21 @@ class JarvisRingsPainter extends CustomPainter {
   }
 }
 
+/// 一条合并聊天记录：发言者 + 文本 + 时间（HH:mm）。
+class _ChatEntry {
+  _ChatEntry({required this.isUser, required this.text, required this.time});
+
+  final bool isUser;
+  final String text;
+  final String time;
+}
+
 /// 贾维斯特效 — JARVIS 风格环形动画 + 终端
 class JarvisAgentVisual implements AgentVisual {
   final TickerProvider vsync;
 
   JarvisAgentVisual({required this.vsync}) {
-    _userScrollController = ScrollController();
-    _aiScrollController = ScrollController();
+    _chatScrollController = ScrollController();
     _initAnimationControllers();
   }
 
@@ -434,13 +442,10 @@ class JarvisAgentVisual implements AgentVisual {
   String _currentEffect = 'idle';
   bool _isSpeaking = false; // 标记用户是否正在说话
 
-  // 终端消息数据
-  final List<String> _userMessages = [];
-  final List<String> _aiMessages = [];
+  // 合并聊天记录：贾维斯与用户按时间顺序交替（你一句我一句）
+  final List<_ChatEntry> _chatMessages = [];
 
-  // 与 _userMessages/_aiMessages 一一对应的时间戳（HH:mm），追加消息时同步写入
-  final List<String> _userTimes = [];
-  final List<String> _aiTimes = [];
+  // 流式输出中的「当前行」（用户识别 / 贾维斯回复），同一时刻至多一行在写
   String _currentUserText = '';
   String _currentAiText = '';
 
@@ -449,13 +454,11 @@ class JarvisAgentVisual implements AgentVisual {
     return '${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
   }
 
-  late ScrollController _userScrollController;
-  late ScrollController _aiScrollController;
+  late ScrollController _chatScrollController;
 
   late AnimationController _ringOpacityController;
   late AnimationController _ringScaleController;
   late AnimationController _terminalSlideController;
-  late AnimationController _leftTerminalSlideController;
   late AnimationController _rightTerminalSlideController;
 
 
@@ -500,12 +503,6 @@ class JarvisAgentVisual implements AgentVisual {
     );
 
     _terminalSlideController = AnimationController(
-      vsync: vsync,
-      duration: const Duration(milliseconds: 500),
-      value: 0.0,
-    );
-
-    _leftTerminalSlideController = AnimationController(
       vsync: vsync,
       duration: const Duration(milliseconds: 500),
       value: 0.0,
@@ -588,10 +585,7 @@ class JarvisAgentVisual implements AgentVisual {
       _isHiding = true;
       print('Set effect to: hide');
       // 立即清空消息，不依赖动画回调
-      _userMessages.clear();
-      _aiMessages.clear();
-      _userTimes.clear();
-      _aiTimes.clear();
+      _chatMessages.clear();
       _currentUserText = '';
       _currentAiText = '';
       // 监听动画状态，动画完成后重置 _isHiding
@@ -610,7 +604,6 @@ class JarvisAgentVisual implements AgentVisual {
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeInCubic,
       );
-      _leftTerminalSlideController.reverse();
       _rightTerminalSlideController.reverse();
     } else if (command.startsWith('user:')) {
       final text = command.substring(5);
@@ -626,6 +619,11 @@ class JarvisAgentVisual implements AgentVisual {
       // 空消息不处理（避免触发动画）
       if (text.isEmpty) return;
       _currentEffect = 'user_text';
+      // 上一句贾维斯回复还没落定 → 先落入聊天历史
+      if (_currentAiText.isNotEmpty) {
+        _chatMessages.add(_ChatEntry(isUser: false, text: _currentAiText, time: _hm()));
+        _currentAiText = '';
+      }
       // 检查是否包含关系（流式追加）
       if (_currentUserText.isNotEmpty && text.startsWith(_currentUserText)) {
         // 流式传输中，不保存历史，只更新当前文本
@@ -633,17 +631,16 @@ class JarvisAgentVisual implements AgentVisual {
       } else {
         // 新对话，将之前的转为历史
         if (_currentUserText.isNotEmpty) {
-          _userMessages.add(_currentUserText);
-          _userTimes.add(_hm());
+          _chatMessages.add(_ChatEntry(isUser: true, text: _currentUserText, time: _hm()));
         }
         _currentUserText = text;
-        // 有文字时滑入右侧终端
+        // 有文字时滑入右下角聊天面板
         if (_rightTerminalSlideController.value == 0) {
           _rightTerminalSlideController.forward();
         }
       }
       // 流式传输时滚动到底部（详见 handleCommand 顶部 scrollToBottomOnNextFrame 注释）
-      scrollToBottomOnNextFrame(_userScrollController);
+      scrollToBottomOnNextFrame(_chatScrollController);
     } else if (command.startsWith('ai:')) {
       // AI 开始说话，恢复 scale
       _isSpeaking = false;
@@ -656,6 +653,13 @@ class JarvisAgentVisual implements AgentVisual {
       }
       _currentEffect = 'ai_text';
       final text = command.substring(3);
+      // 空消息不处理（避免把未落定的用户行误入历史）
+      if (text.isEmpty) return;
+      // 用户说的话还没落定 → 先落入聊天历史
+      if (_currentUserText.isNotEmpty) {
+        _chatMessages.add(_ChatEntry(isUser: true, text: _currentUserText, time: _hm()));
+        _currentUserText = '';
+      }
       // 检查是否包含关系（流式追加）
       if (_currentAiText.isNotEmpty && text.startsWith(_currentAiText)) {
         // 流式传输中，不保存历史，只更新当前文本
@@ -663,17 +667,16 @@ class JarvisAgentVisual implements AgentVisual {
       } else {
         // 新对话，将之前的转为历史
         if (_currentAiText.isNotEmpty) {
-          _aiMessages.add(_currentAiText);
-          _aiTimes.add(_hm());
+          _chatMessages.add(_ChatEntry(isUser: false, text: _currentAiText, time: _hm()));
         }
         _currentAiText = text;
-        // 有文字时滑入左侧终端
-        if (_leftTerminalSlideController.value == 0) {
-          _leftTerminalSlideController.forward();
+        // 有文字时滑入右下角聊天面板
+        if (_rightTerminalSlideController.value == 0) {
+          _rightTerminalSlideController.forward();
         }
       }
       // 流式传输时滚动到底部（同 user 分支）
-      scrollToBottomOnNextFrame(_aiScrollController);
+      scrollToBottomOnNextFrame(_chatScrollController);
     }
   }
 
@@ -727,12 +730,10 @@ class JarvisAgentVisual implements AgentVisual {
 
   @override
   void dispose() {
-    _userScrollController.dispose();
-    _aiScrollController.dispose();
+    _chatScrollController.dispose();
     _ringOpacityController.dispose();
     _ringScaleController.dispose();
     _terminalSlideController.dispose();
-    _leftTerminalSlideController.dispose();
     _rightTerminalSlideController.dispose();
     _outerRingController.dispose();
     _arcsController.dispose();
@@ -747,37 +748,8 @@ class JarvisAgentVisual implements AgentVisual {
     double screenWidth,
     double screenHeight,
   ) {
-    final double terminalHeight = screenHeight / 3;
-
-    final leftSlide =
-        Tween<Offset>(begin: const Offset(-1.0, 0), end: Offset.zero).animate(
-          CurvedAnimation(
-            parent: _leftTerminalSlideController,
-            curve: Curves.easeOutCubic,
-          ),
-        );
-
-    return SlideTransition(
-      position: leftSlide,
-      child: Align(
-        alignment: Alignment.topLeft,
-        child: Container(
-          margin: EdgeInsets.only(left: 80, top: screenHeight * 0.10),
-          child: SizedBox(
-            height: terminalHeight,
-            child: _buildTerminal(
-              screenWidth: screenWidth,
-              messages: _aiMessages,
-              times: _aiTimes,
-              currentText: _currentAiText,
-              title: 'J.A.R.V.I.S.',
-              maxHeight: terminalHeight,
-              scrollController: _aiScrollController,
-            ),
-          ),
-        ),
-      ),
-    );
+    // 贾维斯回复已并入右下角聊天面板（见 buildUserTerminal），不再单独左上角终端
+    return const SizedBox.shrink();
   }
 
   @override
@@ -804,14 +776,9 @@ class JarvisAgentVisual implements AgentVisual {
           margin: EdgeInsets.only(right: 80, bottom: screenHeight * 0.10),
           child: SizedBox(
             height: terminalHeight,
-            child: _buildTerminal(
+            child: _buildChatTerminal(
               screenWidth: screenWidth,
-              messages: _userMessages,
-              times: _userTimes,
-              currentText: _currentUserText,
-              title: 'MESSAGE FEED',
               maxHeight: terminalHeight,
-              scrollController: _userScrollController,
             ),
           ),
         ),
@@ -861,34 +828,60 @@ class JarvisAgentVisual implements AgentVisual {
     );
   }
 
-  // 单行：消息（左，自动换行）+ 时间戳（右，青色）
-  //
-  // 重要：消息文本不设 maxLines / ellipsis，让完整内容展示。
-  // 终端历史本来就该让用户读完所有对话 —— 截断消息是误导。
-  // 当前行（流式中）也不截断，否则用户看不到 AI 正在输出的完整回复。
-  Widget _terminalRow(String msg, String time, {bool current = false}) {
+  // 聊天行：发言者标签 + 消息 + 时间戳。
+  // 贾维斯行靠左、用户行靠右，形成「你一句我一句」的对话视图。
+  // 消息不设 maxLines / ellipsis，完整展示（含流式当前行）。
+  Widget _chatRow({
+    required bool isUser,
+    required String msg,
+    required String time,
+    bool current = false,
+  }) {
+    final Color accent = isUser ? const Color(0xFFFFB84D) : const Color(0xFF8CC1FA);
+    final String label = isUser ? 'YOU' : 'JARVIS';
     return Padding(
       padding: const EdgeInsets.only(bottom: 11),
       child: Row(
+        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: accent.withAlpha(35),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: accent.withAlpha(120), width: 1),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(
+                color: accent,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
             child: Text(
               msg,
               style: TextStyle(
-                color: current ? Colors.white : Colors.white70,
+                color: current
+                    ? Colors.white
+                    : (isUser ? const Color(0xFFFFE9C0) : Colors.white70),
                 fontSize: 14,
                 height: 1.35,
                 fontWeight: current ? FontWeight.w500 : FontWeight.w400,
               ),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Text(
               time,
-              style: TextStyle(color: Color(0xFF8CC1FA).withAlpha(150), fontSize: 11),
+              style: TextStyle(color: accent.withAlpha(150), fontSize: 11),
             ),
           ),
         ],
@@ -896,26 +889,27 @@ class JarvisAgentVisual implements AgentVisual {
     );
   }
 
-  Widget _buildTerminal({
+  Widget _buildChatTerminal({
     required double screenWidth,
-    required List<String> messages,
-    required List<String> times,
-    required String currentText,
-    required String title,
     required double maxHeight,
-    required ScrollController scrollController,
   }) {
     final List<Widget> items = [];
 
-    // 历史消息（旧的在前）+ 对应时间戳
-    for (int i = 0; i < messages.length; i++) {
-      items.add(_terminalRow(messages[i], i < times.length ? times[i] : ''));
+    // 历史聊天记录（旧的在前，贾维斯/用户交替）
+    for (final entry in _chatMessages) {
+      items.add(
+        _chatRow(isUser: entry.isUser, msg: entry.text, time: entry.time),
+      );
     }
 
-    // 当前流式文本（最后一项，高亮）
-    if (currentText.isNotEmpty) {
-      items.add(_terminalRow(currentText, _hm(), current: true));
-    } else if (items.isEmpty) {
+    // 当前流式行（最后追加，高亮）：用户识别中 / 贾维斯回复中
+    if (_currentUserText.isNotEmpty) {
+      items.add(_chatRow(isUser: true, msg: _currentUserText, time: _hm(), current: true));
+    }
+    if (_currentAiText.isNotEmpty) {
+      items.add(_chatRow(isUser: false, msg: _currentAiText, time: _hm(), current: true));
+    }
+    if (items.isEmpty) {
       items.add(
         const Padding(
           padding: EdgeInsets.only(top: 2),
@@ -932,13 +926,13 @@ class JarvisAgentVisual implements AgentVisual {
     }
 
     return HudTerminalShell(
-      title: title,
+      title: 'J.A.R.V.I.S. · CHAT',
       titleIcon: Image.asset("assets/ico-jarvis.png", width: 14, height: 14),
       showStatusDot: true,
-      width: screenWidth / 6,
+      width: screenWidth / 5,
       maxHeight: maxHeight,
-      child: ListView( 
-        controller: scrollController,
+      child: ListView(
+        controller: _chatScrollController,
         shrinkWrap: true,
         reverse: false,
         physics: const ClampingScrollPhysics(),
