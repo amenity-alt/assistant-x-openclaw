@@ -47,7 +47,11 @@ body::before {
 .app { position: relative; z-index: 1; height: 100%; }
 
 /* ── 嵌入模式（overlay WebView）：透明背景 + 卡片铺满 ── */
-.embed-mode { background: transparent !important; }
+/* WKWebView 在 macOS 不支持透明背景，改用不透明深蓝玻璃底，
+   避免加载时露出白底；视觉上仍是一块深色玻璃 HUD 卡片 */
+.embed-mode {
+  background: linear-gradient(165deg, #0b1830 0%, #071024 55%, #050d1c 100%) !important;
+}
 .embed-mode::before { display: none !important; }
 .embed-mode .app { height: 100%; }
 .embed-mode .module {

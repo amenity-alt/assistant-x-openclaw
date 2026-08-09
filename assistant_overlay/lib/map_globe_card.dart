@@ -31,7 +31,6 @@ class _MapGlobeCardState extends State<MapGlobeCard> {
   void _initController() {
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0x00000000))
       ..setNavigationDelegate(
         NavigationDelegate(
           onWebResourceError: (WebResourceError error) {
