@@ -2582,12 +2582,30 @@ class VoiceAssistant:
     _MAP_RE_RESET = re.compile(
         r"重置地图|恢复地图|地图重置|地图恢复|取消定位|退出定位|关闭地图|收起地图"
     )
+    # 口语助词/命令前缀：定位前先剥离，避免被当成地点名（如"定位一下"→"一下"）
+    _MAP_RE_CLEAN = re.compile(r"(请|麻烦|帮我|给我|帮我一下|一下)")
+    # 地点名提取：贪婪 {2,12} 取尽可能长的地名
+    _MAP_RE_LOCATE = re.compile(r"定位(?:到|去)?\s*([\u4e00-\u9fa5A-Za-z]{2,12})")
+    # 尾部语气词 / ASR 噪音 / 指令残留，需剥离
+    _MAP_CITY_TAIL = re.compile(
+        r"(的|好了|好吧|吧|啊|哦|呀|呢|谢谢|感谢|地图|最新|热点|资讯|新闻|NIC)$"
+    )
+    # 最近一次地图指令去重（ASR 回声/流式重发时 3 秒内只执行一次）
+    _last_map_cmd = ""
+    _last_map_cmd_ts = 0.0
 
     def _handle_map_command(self, text: str) -> bool:
         """识别地图指令（语音驱动 overlay）：返回 True 表示已消费，不再进大模型。"""
         t = (text or "").strip()
         if not t:
             return False
+        # 去重：同一句指令 3 秒内重复（回声/流式重发）→ 忽略但仍消费
+        now = time.time()
+        if t == self._last_map_cmd and now - self._last_map_cmd_ts < 3.0:
+            print(f"[Map] 重复指令忽略: {t}")
+            return True
+        self._last_map_cmd = t
+        self._last_map_cmd_ts = now
         # 缩放：整句只有"放大/缩小"，或带"地图"二字
         if t in ("放大", "缩小") or self._MAP_RE_ZOOM.search(t):
             direction = "放大" if ("放大" in t) else "缩小"
@@ -2598,11 +2616,12 @@ class VoiceAssistant:
             self.visual.send("map_reset")
             print("[Map] 重置地图")
             return True
-        # 定位：定位(到/去)城市
+        # 定位：定位(到/去)城市（先剥离"请/帮我/一下"等口语助词，再贪婪取地名）
         if "定位" in t:
-            m = re.search(r"定位(?:到|去)?\s*([\u4e00-\u9fa5A-Za-z]{2,10}?)", t)
+            cleaned = self._MAP_RE_CLEAN.sub("", t)
+            m = self._MAP_RE_LOCATE.search(cleaned)
             if m:
-                city = re.sub(r"(的|最新|热点|资讯|新闻|地图)$", "", m.group(1))
+                city = self._MAP_CITY_TAIL.sub("", m.group(1)).strip()
                 if city:
                     print(f"[Map] 定位到: {city}")
                     # 先用本地城市表快速定位，后台天地图地理编码解析出精确坐标后覆盖

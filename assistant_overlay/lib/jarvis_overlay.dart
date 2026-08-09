@@ -554,6 +554,11 @@ class JarvisAgentVisual implements AgentVisual {
     }
 
     if (command == 'wake') {
+      // 唤醒时强制回到球体视图：清除上次定位的天地图状态
+      if (_mapController.mode != MapMode.globe) {
+        _mapController.reset();
+        print('[Map] wake: reset to globe');
+      }
       _mapVisible = true;
       _isHiding = false;
       _currentEffect = 'wake';
