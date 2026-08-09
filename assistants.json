@@ -314,5 +314,6 @@
       ],
       "asr_mode": "sense_voice"
     }
-  ]
+  ],
+  "map_dashboard_on_wake": true
 }

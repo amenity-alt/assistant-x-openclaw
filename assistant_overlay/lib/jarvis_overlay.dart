@@ -11,6 +11,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'agent_visual.dart';
 import 'hud_terminal_shell.dart';
+import 'map_globe_card.dart';
 
 class JarvisRingsPainter extends CustomPainter {
   final double outerRingRotation;
@@ -441,6 +442,7 @@ class JarvisAgentVisual implements AgentVisual {
 
   String _currentEffect = 'idle';
   bool _isSpeaking = false; // 标记用户是否正在说话
+  bool _mapVisible = false; // 左上角地图态势卡片（wake 显示 / hide 隐藏）
 
   // 合并聊天记录：贾维斯与用户按时间顺序交替（你一句我一句）
   final List<_ChatEntry> _chatMessages = [];
@@ -550,6 +552,7 @@ class JarvisAgentVisual implements AgentVisual {
     }
 
     if (command == 'wake') {
+      _mapVisible = true;
       _isHiding = false;
       _currentEffect = 'wake';
       print('Set effect to: wake');
@@ -580,6 +583,7 @@ class JarvisAgentVisual implements AgentVisual {
     } else if (command == 'error') {
       _currentEffect = 'error';
     } else if (command == 'hide') {
+      _mapVisible = false;
       _currentEffect = 'hide';
       _isSpeaking = false;
       _isHiding = true;
@@ -947,76 +951,88 @@ class JarvisAgentVisual implements AgentVisual {
     double screenWidth,
     double screenHeight,
   ) {
-    return Positioned(
-      right: 80 + (screenWidth / 6 - _jarvisRingSize) / 2,
-      top: screenHeight * 0.10,
-      child: AnimatedBuilder(
-        animation: _ringOpacityController,
-        builder: (context, child) {
-          return Opacity(
-            opacity: _ringOpacityController.value,
-            child: AnimatedBuilder(
-              animation: _ringScaleController,
-              builder: (context, child) {
-                return AnimatedBuilder(
-                  animation: _pulseController,
+    return Stack(
+      children: [
+        Positioned(
+          right: 80 + (screenWidth / 6 - _jarvisRingSize) / 2,
+          top: screenHeight * 0.10,
+          child: AnimatedBuilder(
+            animation: _ringOpacityController,
+            builder: (context, child) {
+              return Opacity(
+                opacity: _ringOpacityController.value,
+                child: AnimatedBuilder(
+                  animation: _ringScaleController,
                   builder: (context, child) {
-                    return SizedBox(
-                      width: _jarvisRingSize,
-                      height: _jarvisRingSize,
-                      child: CustomPaint(
-                        painter: Platform.isWindows
-                            ? JarvisRingsPainterWindows(
-                                outerRingRotation:
-                                    (_outerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                arcsRotation:
-                                    (_arcsAngle * 2 * math.pi) % (2 * math.pi),
-                                dataRingRotation:
-                                    (_dataRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                innerRingRotation:
-                                    (_innerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                pulseValue: _pulseController.value,
-                                currentEffect: _currentEffect,
-                                speakingScale:
-                                    (_ringScaleController.value - 1.0).clamp(
-                                      0.0,
-                                      0.1,
-                                    ) *
-                                    10,
-                              )
-                            : JarvisRingsPainter(
-                                outerRingRotation:
-                                    (_outerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                arcsRotation:
-                                    (_arcsAngle * 2 * math.pi) % (2 * math.pi),
-                                dataRingRotation:
-                                    (_dataRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                innerRingRotation:
-                                    (_innerRingAngle * 2 * math.pi) %
-                                    (2 * math.pi),
-                                pulseValue: _pulseController.value,
-                                currentEffect: _currentEffect,
-                                speakingScale:
-                                    (_ringScaleController.value - 1.0).clamp(
-                                      0.0,
-                                      0.1,
-                                    ) *
-                                    10,
-                              ),
-                      ),
+                    return AnimatedBuilder(
+                      animation: _pulseController,
+                      builder: (context, child) {
+                        return SizedBox(
+                          width: _jarvisRingSize,
+                          height: _jarvisRingSize,
+                          child: CustomPaint(
+                            painter: Platform.isWindows
+                                ? JarvisRingsPainterWindows(
+                                    outerRingRotation:
+                                        (_outerRingAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    arcsRotation:
+                                        (_arcsAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    dataRingRotation:
+                                        (_dataRingAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    innerRingRotation:
+                                        (_innerRingAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    pulseValue: _pulseController.value,
+                                    currentEffect: _currentEffect,
+                                    speakingScale:
+                                        (_ringScaleController.value - 1.0)
+                                                .clamp(0.0, 0.1) *
+                                            10,
+                                  )
+                                : JarvisRingsPainter(
+                                    outerRingRotation:
+                                        (_outerRingAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    arcsRotation:
+                                        (_arcsAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    dataRingRotation:
+                                        (_dataRingAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    innerRingRotation:
+                                        (_innerRingAngle * 2 * math.pi) %
+                                        (2 * math.pi),
+                                    pulseValue: _pulseController.value,
+                                    currentEffect: _currentEffect,
+                                    speakingScale:
+                                        (_ringScaleController.value - 1.0)
+                                                .clamp(0.0, 0.1) *
+                                            10,
+                                  ),
+                          ),
+                        );
+                      },
                     );
                   },
-                );
-              },
+                ),
+              );
+            },
+          ),
+        ),
+        // 左上角地图态势卡片（wake 显示 / hide 隐藏）
+        if (_mapVisible)
+          Positioned(
+            left: 80,
+            top: screenHeight * 0.10,
+            child: MapGlobeCard(
+              width: screenWidth * 0.13,
+              height: screenWidth * 0.13 * 1.4,
             ),
-          );
-        },
-      ),
+          ),
+      ],
     );
   }
 

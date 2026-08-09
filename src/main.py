@@ -159,6 +159,7 @@ from log_setup import setup_logging, get_diag_logger
 from lifecycle import get_lifecycle_manager
 from media_pause import MediaPauseHook
 from dock_control import DockAutohideHook
+from map_dashboard import MapDashboardHook
 
 # 文件级诊断/错误日志（只落盘，不进控制中心）
 _diag = get_diag_logger()
@@ -199,6 +200,15 @@ def _load_dock_autohide() -> bool:
             return bool(json.load(f).get("dock_autohide_on_wake", False))
     except Exception:
         return False
+
+
+def _load_map_dashboard() -> bool:
+    """读取 assistants.json 顶层 map_dashboard_on_wake：true 时唤醒确保地图服务在线（overlay 卡片）。"""
+    try:
+        with open(_ASSISTANTS_CFG_PATH, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("map_dashboard_on_wake", True))
+    except Exception:
+        return True
 
 
 _ENGINE = _load_engine()
@@ -590,6 +600,9 @@ class VoiceAssistant:
         if _load_dock_autohide():
             self._lifecycle.register(DockAutohideHook())
             print("[Dock] 激活期自动隐藏 Dock：已启用（dock_autohide_on_wake）")
+        if _load_map_dashboard():
+            self._lifecycle.register(MapDashboardHook())
+            print("[Map] 唤醒时确保地图服务在线（overlay 左上角卡片）：已启用（map_dashboard_on_wake）")
         self.is_awake = False
         self.continuous_mode = False
         self.audio_queue = queue.Queue()
