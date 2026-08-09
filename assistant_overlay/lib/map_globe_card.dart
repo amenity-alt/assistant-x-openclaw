@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -127,37 +130,54 @@ class MapNewsItem {
   const MapNewsItem({required this.title, this.source = '', this.time = ''});
 }
 
+/// 地图展示模式：globe=3D 地球（默认），tianditu=天地图瓦片（定位时）
+enum MapMode { globe, tianditu }
+
 /// 地图视图控制器：overlay 通过 TCP 命令驱动（缩放 / 定位 / 资讯）
 class MapGlobeController extends ChangeNotifier {
+  MapMode mode = MapMode.globe;
   double targetZoom = 1.0;
   double targetLat = 20.0;
   double targetLon = 105.0;
+  int tiandituZoom = 10; // 天地图瓦片级别（5~16）
   String? locatedCity;
   List<MapNewsItem> news = const [];
 
   void zoomIn() {
-    targetZoom = (targetZoom + 0.35).clamp(1.0, 3.0);
+    if (mode == MapMode.tianditu) {
+      tiandituZoom = (tiandituZoom + 1).clamp(5, 16);
+    } else {
+      targetZoom = (targetZoom + 0.35).clamp(1.0, 3.0);
+    }
     notifyListeners();
   }
 
   void zoomOut() {
-    targetZoom = (targetZoom - 0.35).clamp(1.0, 3.0);
+    if (mode == MapMode.tianditu) {
+      tiandituZoom = (tiandituZoom - 1).clamp(5, 16);
+    } else {
+      targetZoom = (targetZoom - 0.35).clamp(1.0, 3.0);
+    }
     notifyListeners();
   }
 
   void reset() {
+    mode = MapMode.globe;
     targetZoom = 1.0;
     targetLat = 20.0;
     targetLon = 105.0;
+    tiandituZoom = 10;
     locatedCity = null;
     news = const [];
     notifyListeners();
   }
 
   void locateTo(double lat, double lon, String city) {
+    mode = MapMode.tianditu;
     targetLat = lat;
     targetLon = lon;
     targetZoom = 2.4;
+    tiandituZoom = 10;
     locatedCity = city;
     notifyListeners();
   }
@@ -489,6 +509,224 @@ class _GlobePainter extends CustomPainter {
       old.time != time || old.zoom != zoom || old.lat0 != lat0 || old.lon0 != lon0;
 }
 
+/// ── 天地图（Tianditu）瓦片地图 ───────────────────────────────────────
+/// 定位时展示：vec_w（矢量底图）+ cva_w（矢量注记）两层 WMTS 瓦片。
+const String _tdtKey = 'f6eff7213d1409c324f32588057ff535';
+const int _tdtTileSize = 256;
+
+class _Tdt {
+  static double worldPx(int zoom) => _tdtTileSize * math.pow(2, zoom).toDouble();
+
+  /// Web Mercator：经纬度 → 世界像素坐标
+  static ({double x, double y}) latLonToPx(double lat, double lon, int zoom) {
+    final w = worldPx(zoom);
+    final latRad = lat * math.pi / 180.0;
+    final x = (lon + 180.0) / 360.0 * w;
+    final y =
+        (1.0 - math.log(math.tan(latRad) + 1.0 / math.cos(latRad)) / math.pi) /
+            2.0 *
+            w;
+    return (x: x, y: y);
+  }
+
+  static String url(String layer, int z, int x, int y) {
+    final sub = (x + y + z) % 8; // t0~t7 轮询，避免单域名限流
+    return 'https://t$sub.tianditu.gov.cn/${layer}_w/wmts'
+        '?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0'
+        '&LAYER=$layer&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles'
+        '&TILEMATRIX=$z&TILEROW=$y&TILECOL=$x&tk=$_tdtKey';
+  }
+}
+
+/// 天地图瓦片画笔：绘制底图+注记两层，居中于定位城市，保留定位标记/扫描动画
+class _TileMapPainter extends CustomPainter {
+  final double lat0;
+  final double lon0;
+  final int zoom;
+  final double time; // 0..1 循环时间源（定位标记脉冲）
+  final Map<String, ui.Image> tiles; // key: layer/z/x/y
+  final int tilesVersion;
+
+  _TileMapPainter({
+    required this.lat0,
+    required this.lon0,
+    required this.zoom,
+    required this.time,
+    required this.tiles,
+    required this.tilesVersion,
+  });
+
+  static const _cyan = Color(0xFF35D0FF);
+  static const _hotColor = Color(0xFFFFB347);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    try {
+      final c = size.center(Offset.zero);
+      final center = _Tdt.latLonToPx(lat0, lon0, zoom);
+      final halfW = size.width / 2;
+      final halfH = size.height / 2;
+
+      // 暗色底（瓦片未加载前也有底）
+      canvas.drawRect(
+        Offset.zero & size,
+        Paint()..color = const Color(0xFF0A1B33),
+      );
+
+      final x0 = ((center.x - halfW) / _tdtTileSize).floor();
+      final x1 = ((center.x + halfW) / _tdtTileSize).floor();
+      final y0 = ((center.y - halfH) / _tdtTileSize).floor();
+      final y1 = ((center.y + halfH) / _tdtTileSize).floor();
+      final maxTile = (math.pow(2, zoom).toDouble() - 1).toInt();
+
+      for (var ty = y0; ty <= y1; ty++) {
+        if (ty < 0 || ty > maxTile) continue;
+        for (var tx = x0; tx <= x1; tx++) {
+          if (tx < 0 || tx > maxTile) continue;
+          final dx = tx * _tdtTileSize - center.x + halfW;
+          final dy = ty * _tdtTileSize - center.y + halfH;
+          final rect = Rect.fromLTWH(dx, dy, _tdtTileSize + 1, _tdtTileSize + 1);
+          // 底图层
+          final base = tiles['vec/$zoom/$tx/$ty'];
+          if (base != null) {
+            canvas.drawImageRect(
+                base, Rect.fromLTWH(0, 0, base.width.toDouble(), base.height.toDouble()), rect, Paint());
+          } else {
+            _placeholder(canvas, rect, tx, ty);
+          }
+          // 注记层（城市/道路名）
+          final ann = tiles['cva/$zoom/$tx/$ty'];
+          if (ann != null) {
+            canvas.drawImageRect(
+                ann, Rect.fromLTWH(0, 0, ann.width.toDouble(), ann.height.toDouble()), rect, Paint());
+          }
+        }
+      }
+
+      // 定位城市标记：橙色脉冲环 + 光点（居中）
+      final pulse = 0.5 + 0.5 * math.sin(time * 2 * math.pi * 2);
+      _glowDot(canvas, c, 5.0 + pulse * 3.0, _hotColor, 1.0);
+      canvas.drawCircle(
+        c,
+        7.0 + pulse * 5.0,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.4
+          ..color = _hotColor.withValues(alpha: 0.85)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
+      );
+      canvas.drawCircle(
+        c,
+        14.0 + pulse * 6.0,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8
+          ..color = _hotColor.withValues(alpha: 0.4),
+      );
+
+      // 外框扫描环
+      canvas.drawCircle(
+        c,
+        math.min(size.width, size.height) * 0.48,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2
+          ..color = _cyan.withValues(alpha: 0.30),
+      );
+      final a = time * 2 * math.pi;
+      final ringR = math.min(size.width, size.height) * 0.48;
+      canvas.drawArc(
+        Rect.fromCircle(center: c, radius: ringR),
+        a,
+        0.9,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.2
+          ..strokeCap = StrokeCap.round
+          ..color = _cyan.withValues(alpha: 0.75)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+      );
+      final tip =
+          Offset(c.dx + ringR * math.cos(a), c.dy + ringR * math.sin(a));
+      _glowDot(canvas, tip, 4.0, _cyan, 0.9);
+
+      // 左上角标注
+      final label = 'TIANDITU · Z$zoom';
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: TextStyle(
+            color: _cyan.withValues(alpha: 0.7),
+            fontSize: 7,
+            letterSpacing: 1.2,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, const Offset(6, 4));
+    } catch (e) {
+      debugPrint('[TDT] paint error: $e');
+    }
+  }
+
+  void _placeholder(Canvas canvas, Rect rect, int tx, int ty) {
+    canvas.drawRect(rect, Paint()..color = const Color(0xFF0E2340));
+    canvas.drawRect(
+      rect.deflate(0.5),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.6
+        ..color = const Color(0xFF2F8CFF).withValues(alpha: 0.18),
+    );
+    final center = rect.center;
+    canvas.drawLine(
+      Offset(rect.left, center.dy),
+      Offset(rect.right, center.dy),
+      Paint()
+        ..strokeWidth = 0.5
+        ..color = const Color(0xFF2F8CFF).withValues(alpha: 0.12),
+    );
+    // 极简坐标标注，便于调试
+    final tp = TextPainter(
+      text: TextSpan(
+        text: '$tx,$ty',
+        style: TextStyle(
+          color: const Color(0xFF5F87B8).withValues(alpha: 0.5),
+          fontSize: 6,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, center + const Offset(2, 2));
+  }
+
+  void _glowDot(Canvas canvas, Offset p, double r, Color color, double alpha) {
+    canvas.drawCircle(
+      p,
+      r,
+      Paint()
+        ..shader = RadialGradient(
+          colors: [
+            color.withValues(alpha: alpha),
+            color.withValues(alpha: alpha * 0.25),
+            color.withValues(alpha: 0.0),
+          ],
+          stops: const [0.0, 0.5, 1.0],
+        ).createShader(Rect.fromCircle(center: p, radius: r)),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _TileMapPainter old) =>
+      old.lat0 != lat0 ||
+      old.lon0 != lon0 ||
+      old.zoom != zoom ||
+      old.time != time ||
+      old.tilesVersion != tilesVersion ||
+      old.tiles != tiles;
+}
+
 class MapGlobeCard extends StatefulWidget {
   final double width;
   final double height;
@@ -525,6 +763,16 @@ class _MapGlobeCardState extends State<MapGlobeCard>
   int _flow = 9;
   int _agents = 6;
   String _risk = 'LOW';
+
+  // 天地图瓦片缓存（LRU）+ 加载中集合 + 版本号（驱动重绘）
+  final HttpClient _http = HttpClient();
+  final Map<String, ui.Image> _tiles = {};
+  final List<String> _tileOrder = [];
+  final Set<String> _loadingTiles = {};
+  int _tilesVersion = 0;
+  bool _tileDirty = true;
+  Size _lastTileArea = Size.zero;
+  static const int _maxTiles = 96;
 
   static double _lerp(double a, double b, double t) => a + (b - a) * t;
 
@@ -568,8 +816,83 @@ class _MapGlobeCardState extends State<MapGlobeCard>
       if (moved) {
         _view.forward(from: 0);
       }
+      // 天地图模式：中心/级别变化后重新拉取可见瓦片
+      if (_controller.mode == MapMode.tianditu) {
+        _tileDirty = true;
+      }
     } catch (e) {
       debugPrint('[Globe] view change error: $e');
+    }
+  }
+
+  /// 天地图：计算当前中心/级别下可见瓦片并异步加载（缓存+LRU）
+  void _refreshTiles(Size area) {
+    if (_controller.mode != MapMode.tianditu) return;
+    _tileDirty = false;
+    final z = _controller.tiandituZoom;
+    final center =
+        _Tdt.latLonToPx(_controller.targetLat, _controller.targetLon, z);
+    final halfW = area.width / 2 + _tdtTileSize;
+    final halfH = area.height / 2 + _tdtTileSize;
+    final x0 = ((center.x - halfW) / _tdtTileSize).floor();
+    final x1 = ((center.x + halfW) / _tdtTileSize).floor();
+    final y0 = ((center.y - halfH) / _tdtTileSize).floor();
+    final y1 = ((center.y + halfH) / _tdtTileSize).floor();
+    final maxTile = (math.pow(2, z).toDouble() - 1).toInt();
+    for (var ty = y0; ty <= y1; ty++) {
+      if (ty < 0 || ty > maxTile) continue;
+      for (var tx = x0; tx <= x1; tx++) {
+        if (tx < 0 || tx > maxTile) continue;
+        for (final layer in const ['vec', 'cva']) {
+          final key = '$layer/$z/$tx/$ty';
+          if (!_tiles.containsKey(key) && !_loadingTiles.contains(key)) {
+            _loadTile(layer, z, tx, ty);
+          }
+        }
+      }
+    }
+  }
+
+  Future<void> _loadTile(String layer, int z, int x, int y) async {
+    final key = '$layer/$z/$x/$y';
+    _loadingTiles.add(key);
+    try {
+      final req = await _http.getUrl(Uri.parse(_Tdt.url(layer, z, x, y)));
+      final res = await req.close();
+      if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+      final builder = BytesBuilder();
+      await for (final chunk in res) {
+        builder.add(chunk);
+      }
+      final codec = await ui.instantiateImageCodec(builder.takeBytes());
+      final frame = await codec.getNextFrame();
+      if (!mounted) {
+        frame.image.dispose();
+        return;
+      }
+      setState(() {
+        final old = _tiles[key];
+        if (old != null) {
+          old.dispose();
+          _tileOrder.remove(key);
+        }
+        _tiles[key] = frame.image;
+        _tileOrder.add(key);
+        _tilesVersion++;
+        _trimTiles();
+      });
+    } catch (e) {
+      debugPrint('[TDT] tile load error $key: $e');
+    } finally {
+      _loadingTiles.remove(key);
+    }
+  }
+
+  void _trimTiles() {
+    while (_tileOrder.length > _maxTiles) {
+      final k = _tileOrder.removeAt(0);
+      _tiles.remove(k)?.dispose();
+      _tilesVersion++;
     }
   }
 
@@ -587,6 +910,11 @@ class _MapGlobeCardState extends State<MapGlobeCard>
   @override
   void dispose() {
     _controller.removeListener(_onViewChanged);
+    _http.close(force: true);
+    for (final img in _tiles.values) {
+      img.dispose();
+    }
+    _tiles.clear();
     _view.dispose();
     _viewCurve.dispose();
     _anim.dispose();
@@ -598,6 +926,9 @@ class _MapGlobeCardState extends State<MapGlobeCard>
     // 供底部 ZOOM 读数使用的当前值（随卡片级 setState 更新即可）
     final t = _viewCurve.value;
     final zoom = _lerp(_beginZoom, _targetZoom, t);
+    final zoomLabel = _controller.mode == MapMode.tianditu
+        ? 'Z${_controller.tiandituZoom}'
+        : '${zoom.toStringAsFixed(1)}×';
 
     return HudTerminalShell(
       title: 'GLOBAL SATCOM',
@@ -622,6 +953,29 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                         child: AnimatedBuilder(
                           animation: Listenable.merge([_anim, _view]),
                           builder: (context, child) {
+                            // 定位 → 天地图瓦片；未定位 → 3D 地球
+                            if (_controller.mode == MapMode.tianditu) {
+                              return LayoutBuilder(
+                                builder: (context, cons) {
+                                  if (_tileDirty ||
+                                      cons.biggest != _lastTileArea) {
+                                    _lastTileArea = cons.biggest;
+                                    _refreshTiles(cons.biggest);
+                                  }
+                                  return CustomPaint(
+                                    painter: _TileMapPainter(
+                                      lat0: _controller.targetLat,
+                                      lon0: _controller.targetLon,
+                                      zoom: _controller.tiandituZoom,
+                                      time: _anim.value,
+                                      tiles: _tiles,
+                                      tilesVersion: _tilesVersion,
+                                    ),
+                                    size: Size.infinite,
+                                  );
+                                },
+                              );
+                            }
                             // 画笔参数在每帧 tick 内计算，飞行动画才真正动起来
                             final vt = _viewCurve.value;
                             return CustomPaint(
@@ -651,7 +1005,13 @@ class _MapGlobeCardState extends State<MapGlobeCard>
               const SizedBox(height: 6),
               const _MemoryLogStrip(),
               const SizedBox(height: 6),
-              _StatsRow(flow: _flow, agents: _agents, risk: _risk, zoom: zoom),
+              _StatsRow(
+                flow: _flow,
+                agents: _agents,
+                risk: _risk,
+                zoom: zoom,
+                zoomLabel: zoomLabel,
+              ),
               const SizedBox(height: 6),
               const _QuickButtons(),
             ],
@@ -877,11 +1237,13 @@ class _StatsRow extends StatelessWidget {
   final int agents;
   final String risk;
   final double zoom;
+  final String zoomLabel;
   const _StatsRow({
     required this.flow,
     required this.agents,
     required this.risk,
     required this.zoom,
+    required this.zoomLabel,
   });
 
   @override
@@ -894,7 +1256,7 @@ class _StatsRow extends StatelessWidget {
         _stat('FLOW', '$flow'),
         _stat('AGENTS', '$agents'),
         _stat('RISK', risk, riskColor),
-        _stat('ZOOM', '${zoom.toStringAsFixed(1)}×', const Color(0xFF66E0FF)),
+        _stat('ZOOM', zoomLabel, const Color(0xFF66E0FF)),
       ],
     );
   }
