@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:async';
 import 'dart:io';
@@ -443,6 +444,7 @@ class JarvisAgentVisual implements AgentVisual {
   String _currentEffect = 'idle';
   bool _isSpeaking = false; // 标记用户是否正在说话
   bool _mapVisible = false; // 左上角地图态势卡片（wake 显示 / hide 隐藏）
+  final MapGlobeController _mapController = MapGlobeController(); // 缩放/定位/资讯
 
   // 合并聊天记录：贾维斯与用户按时间顺序交替（你一句我一句）
   final List<_ChatEntry> _chatMessages = [];
@@ -609,6 +611,49 @@ class JarvisAgentVisual implements AgentVisual {
         curve: Curves.easeInCubic,
       );
       _rightTerminalSlideController.reverse();
+    } else if (command.startsWith('map_zoom')) {
+      final arg = command.substring(8).trim();
+      if (arg == '+') {
+        _mapController.zoomIn();
+        print('[Map] zoom in');
+      } else if (arg == '-') {
+        _mapController.zoomOut();
+        print('[Map] zoom out');
+      } else {
+        _mapController.reset();
+        print('[Map] zoom reset');
+      }
+    } else if (command.startsWith('map_reset')) {
+      _mapController.reset();
+      print('[Map] reset');
+    } else if (command.startsWith('map_locate')) {
+      final city = command.substring(10).trim();
+      final hit = locateCityZh(city);
+      if (hit != null) {
+        _mapController.locateTo(hit.lat, hit.lon, city);
+        print('[Map] locate: $city');
+      } else {
+        // 未收录城市：先飞往中国概览视角
+        _mapController.locateTo(35.0, 105.0, city);
+        print('[Map] locate unknown, fallback: $city');
+      }
+    } else if (command.startsWith('map_news')) {
+      final payload = command.substring(8).trim();
+      try {
+        final data = jsonDecode(payload) as Map<String, dynamic>;
+        final city = (data['city'] as String?) ?? '';
+        final items = ((data['items'] as List?) ?? const [])
+            .map((e) => MapNewsItem(
+                  title: (e as Map<String, dynamic>)['title']?.toString() ?? '',
+                  source: e['source']?.toString() ?? '',
+                  time: e['time']?.toString() ?? '',
+                ))
+            .toList();
+        _mapController.setNews(city, items);
+        print('[Map] news: ${items.length} items for $city');
+      } catch (e) {
+        print('[Map] map_news parse error: $e');
+      }
     } else if (command.startsWith('user:')) {
       final text = command.substring(5);
       // 用户讲话，从当前值平滑变到 1.3（只触发一次）
@@ -1028,8 +1073,9 @@ class JarvisAgentVisual implements AgentVisual {
             left: 80,
             top: screenHeight * 0.10,
             child: MapGlobeCard(
-              width: screenWidth * 0.13,
-              height: screenWidth * 0.13 * 1.4,
+              width: screenWidth * 0.22,
+              height: screenWidth * 0.22 * 1.42,
+              controller: _mapController,
             ),
           ),
       ],

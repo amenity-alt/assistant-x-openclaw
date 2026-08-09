@@ -2016,6 +2016,12 @@ class VoiceAssistant:
                                 recognition_result = ""
                                 continue
 
+                            # 地图指令（定位/缩放/重置）→ 直接驱动 overlay，不进大模型
+                            if self._handle_map_command(recognition_result):
+                                recognition_result = ""
+                                start_audio_stream()
+                                continue
+
                             self.visual.show_user_text(recognition_result)
                             if not self._ignore_next_result:
                                 threading.Thread(
@@ -2542,6 +2548,51 @@ class VoiceAssistant:
         # 清除停止标志，确保不影响后续唤醒
         self._stop_openclaw_request.clear()
         print("\n已退出监听，等待唤醒词...")
+
+    # ── 地图指令（定位 / 缩放 / 重置）────────────────────────────
+    _MAP_RE_ZOOM = re.compile(r"放大地图|缩小地图|地图放大|地图缩小")
+    _MAP_RE_RESET = re.compile(r"重置地图|恢复地图|地图重置|地图恢复|取消定位|退出定位")
+
+    def _handle_map_command(self, text: str) -> bool:
+        """识别地图指令（语音驱动 overlay）：返回 True 表示已消费，不再进大模型。"""
+        t = (text or "").strip()
+        if not t:
+            return False
+        # 缩放：整句只有"放大/缩小"，或带"地图"二字
+        if t in ("放大", "缩小") or self._MAP_RE_ZOOM.search(t):
+            direction = "放大" if ("放大" in t) else "缩小"
+            self.visual.send("map_zoom +" if direction == "放大" else "map_zoom -")
+            print(f"[Map] 缩放指令: {direction}")
+            return True
+        if self._MAP_RE_RESET.search(t):
+            self.visual.send("map_reset")
+            print("[Map] 重置地图")
+            return True
+        # 定位：定位(到/去)城市
+        if "定位" in t:
+            m = re.search(r"定位(?:到|去)?\s*([\u4e00-\u9fa5A-Za-z]{2,10}?)", t)
+            if m:
+                city = re.sub(r"(的|最新|热点|资讯|新闻|地图)$", "", m.group(1))
+                if city:
+                    print(f"[Map] 定位到: {city}")
+                    self.visual.send(f"map_locate {city}")
+                    threading.Thread(
+                        target=self._fetch_city_news_async, args=(city,), daemon=True
+                    ).start()
+                    return True
+        return False
+
+    def _fetch_city_news_async(self, city: str):
+        """后台抓取城市热点并推送给 overlay 展示。"""
+        try:
+            from map_news import fetch_city_news
+
+            items = fetch_city_news(city, limit=4)
+            payload = json.dumps({"city": city, "items": items}, ensure_ascii=False)
+            self.visual.send(f"map_news {payload}")
+            print(f"[Map] 已推送 {city} 资讯 {len(items)} 条")
+        except Exception as e:
+            print(f"[MapNews] 异常: {e}")
 
     def _restart_assistant(self):
         """重启语音助手：执行 start.sh 或 start.bat 脚本"""
