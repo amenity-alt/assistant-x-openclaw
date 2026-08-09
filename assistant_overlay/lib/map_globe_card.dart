@@ -186,10 +186,8 @@ class MapGlobeController extends ChangeNotifier {
 
   void setNews(String city, List<MapNewsItem> items) {
     news = items;
-    // 全球资讯（city 为空）不覆盖已定位城市；仅真实城市定位才更新标签
-    if (city.isNotEmpty) {
-      locatedCity = city;
-    }
+    // 全球资讯（city 为空）→ 清除城市标签，面板显示 GLOBAL NEWS
+    locatedCity = city.isEmpty ? null : city;
     notifyListeners();
   }
 }
