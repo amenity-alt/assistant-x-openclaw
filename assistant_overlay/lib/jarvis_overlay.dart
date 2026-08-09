@@ -638,7 +638,12 @@ class JarvisAgentVisual implements AgentVisual {
         final lon = double.tryParse(parts[1].trim());
         if (lat != null && lon != null) {
           final name = parts.length >= 3 ? parts.sublist(2).join(',').trim() : '';
-          _mapController.locateTo(lat, lon, name.isEmpty ? 'LOCATION' : name);
+          // 合法性钳制，避免异常坐标导致投影计算出错
+          _mapController.locateTo(
+            lat.clamp(-90.0, 90.0),
+            lon.clamp(-180.0, 180.0),
+            name.isEmpty ? 'LOCATION' : name,
+          );
           print('[Map] locate precise: $name ($lat, $lon)');
         } else {
           _fallbackLocate(arg);

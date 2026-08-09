@@ -53,7 +53,11 @@ def _geocode_city(name: str):
         loc = data.get("location") or {}
         lon, lat = loc.get("lon"), loc.get("lat")
         if lon is not None and lat is not None:
-            return float(lat), float(lon)
+            lat, lon = float(lat), float(lon)
+            # 中国大陆范围防御（73~135E, 18~54N），过滤模糊匹配的境外/异常结果
+            if 18.0 <= lat <= 54.0 and 73.0 <= lon <= 135.0:
+                return lat, lon
+            print(f"[Map] geocode 结果超出大陆范围，忽略: {name} ({lat},{lon})")
     except Exception as e:
         print(f"[Map] geocode 失败({name}): {e}")
     return None
