@@ -7,12 +7,12 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import 'hud_terminal_shell.dart';
-import 'world_land_data.dart';
+import 'world_country_data.dart';
 
 /// 地图态势卡片（左上角悬浮）
 ///
 /// Flutter 原生绘制的 JARVIS 全球态势图（正射投影，亚洲为中心）：
-/// 自转地球（约 40 秒/圈）+ 发光大陆轮廓（Natural Earth 简化数据）+
+/// 自转地球（约 20 分钟/圈，缓缓转动）+ 国家多色高亮轮廓（Natural Earth 简化数据）+
 /// 经纬网格 + 全球节点（hub/node/hot）+ 数据弧线流动 + 扫描环 +
 /// 轨道粒子 + 热点脉冲。
 ///
@@ -252,17 +252,19 @@ class _OrthoProjector {
   }
 }
 
-/// 世界大陆轮廓（从 kWorldLandData 扁平数组解包为环）。
-/// 数据格式：[环0点数, lon,lat,lon,lat,..., 环1点数, ...]（经度已连续化）。
-class _WorldLand {
-  static List<List<double>>? _rings;
+/// 世界国家多边形（从 kWorldCountryData 扁平数组解包为 (countryIdx, ring)）。
+/// 数据格式：[countryIdx, 环点数, lon,lat,..., countryIdx, 环点数, ...]。
+class _WorldCountries {
+  static List<(int, List<double>)>? _rings;
 
-  static List<List<double>> rings() {
+  static List<(int, List<double>)> rings() {
     if (_rings != null) return _rings!;
-    final data = kWorldLandData;
-    final result = <List<double>>[];
+    final data = kWorldCountryData;
+    final result = <(int, List<double>)>[];
     var i = 0;
     while (i < data.length) {
+      final ci = data[i].round();
+      i++;
       final n = data[i].round();
       i++;
       final ring = <double>[];
@@ -270,7 +272,7 @@ class _WorldLand {
         ring.add(data[i]);
         i++;
       }
-      if (ring.length >= 6) result.add(ring);
+      if (ring.length >= 6) result.add((ci, ring));
     }
     _rings = result;
     return result;
@@ -297,6 +299,20 @@ class _GlobePainter extends CustomPainter {
   static const _hubColor = Color(0xFF66E0FF);
   static const _nodeColor = Color(0xFF4F9DFF);
   static const _hotColor = Color(0xFFFFB347);
+
+  // 国家多色高亮调色板（HUD 风格，按国家索引循环取色）
+  static const List<Color> _countryPalette = [
+    Color(0xFF2B9AE6), // 亮蓝
+    Color(0xFF3DD6A8), // 青绿
+    Color(0xFFFFB347), // 橙
+    Color(0xFF7A5CFF), // 紫
+    Color(0xFFFF6B6B), // 红
+    Color(0xFF4FD1FF), // 天蓝
+    Color(0xFF9BD44E), // 黄绿
+    Color(0xFFE88CFF), // 粉紫
+    Color(0xFF5AD8E8), // 青
+    Color(0xFFD4A05A), // 金
+  ];
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -361,9 +377,9 @@ class _GlobePainter extends CustomPainter {
   }
 
   void _paintLand(Canvas canvas, _OrthoProjector proj) {
-    const landFill = Color(0xFF2B9AE6);
-    const coast = Color(0xFF8FE8FF);
-    for (final ring in _WorldLand.rings()) {
+    for (final (ci, ring) in _WorldCountries.rings()) {
+      final landFill = _countryPalette[ci % _countryPalette.length];
+      final coast = Color.lerp(landFill, const Color(0xFFFFFFFF), 0.55)!;
       final path = Path();
       bool started = false;
       for (var i = 0; i < ring.length; i += 2) {
@@ -379,14 +395,14 @@ class _GlobePainter extends CustomPainter {
       }
       if (!started) continue;
 
-      // 大陆本体：半透明亮蓝（随球面明暗自然呈现）
+      // 国家本体：半透明高亮色（随球面明暗自然呈现）
       canvas.drawPath(
         path,
         Paint()
           ..style = PaintingStyle.fill
-          ..color = landFill.withValues(alpha: 0.32),
+          ..color = landFill.withValues(alpha: 0.30),
       );
-      // 大陆微光：模糊一笔让轮廓带辉光
+      // 国家微光：同色系模糊一笔让轮廓带辉光
       canvas.drawPath(
         path,
         Paint()
@@ -395,7 +411,7 @@ class _GlobePainter extends CustomPainter {
           ..color = coast.withValues(alpha: 0.22)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.5),
       );
-      // 海岸线：亮色细线
+      // 海岸线：亮色细线（接近白色的同色系高光）
       canvas.drawPath(
         path,
         Paint()
@@ -1103,8 +1119,9 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                             }
                             // 画笔参数在每帧 tick 内计算，飞行动画才真正动起来
                             final vt = _viewCurve.value;
+                            // 缓缓自转：0.3°/s → 约 20 分钟/圈（无循环跳变）
                             final rotationDeg =
-                                _rotWatch.elapsedMilliseconds / 1000.0 * 1.2;
+                                _rotWatch.elapsedMilliseconds / 1000.0 * 0.3;
                             return CustomPaint(
                               painter: _GlobePainter(
                                 time: _anim.value,

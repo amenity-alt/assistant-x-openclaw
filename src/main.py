@@ -2751,8 +2751,17 @@ class VoiceAssistant:
         if self._MAP_RE_RESET.search(t):
             self.visual.send("map_reset")
             self._map_locating = False
+            self._map_located_city = ""
+            self._map_located_key = ""
             print("[Map] 重置地图")
             self._map_show_user_text = True
+            # 退出定位/关闭地图 → 回到地球视图并告知用户（贾维斯英文口播）
+            self.visual.show_ai_text("GLOBE VIEW · 已回到地球视图")
+            threading.Thread(
+                target=self._map_speak,
+                args=("Returning to the global view.",),
+                daemon=True,
+            ).start()
             return True
         # 定位：定位(到/去)城市（先剥离"请/帮我/一下"等口语助词，再贪婪取地名）
         if "定位" in t:
