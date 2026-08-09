@@ -816,7 +816,7 @@ class _NewsPanel extends StatelessWidget {
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                       color: Color(0xFFDCEEFF),
-                                      fontSize: 8,
+                                      fontSize: 9,
                                       height: 1.25,
                                     ),
                                   ),
@@ -827,7 +827,7 @@ class _NewsPanel extends StatelessWidget {
                                           .join(' · '),
                                       style: TextStyle(
                                         color: const Color(0xFF5F87B8),
-                                        fontSize: 6.5,
+                                        fontSize: 7,
                                       ),
                                     ),
                                 ],

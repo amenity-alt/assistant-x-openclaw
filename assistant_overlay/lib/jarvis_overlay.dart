@@ -1073,8 +1073,8 @@ class JarvisAgentVisual implements AgentVisual {
             left: 80,
             top: screenHeight * 0.10,
             child: MapGlobeCard(
-              width: screenWidth * 0.22,
-              height: screenWidth * 0.22 * 1.42,
+              width: screenWidth * 0.21,
+              height: screenWidth * 0.21 * 1.30,
               controller: _mapController,
             ),
           ),
