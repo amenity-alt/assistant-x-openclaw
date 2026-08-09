@@ -248,8 +248,8 @@ class _GlobePainter extends CustomPainter {
       final metric = path.computeMetrics().first;
       final dashPaint = Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.1
-        ..color = _cyan.withValues(alpha: 0.75);
+        ..strokeWidth = 1.3
+        ..color = _cyan.withValues(alpha: 0.85);
       for (double d = -offset; d < metric.length; d += total) {
         canvas.drawPath(
           metric.extractPath(d.clamp(0.0, metric.length),
@@ -261,7 +261,7 @@ class _GlobePainter extends CustomPainter {
       // 移动光点
       final t = (time * 1.7 + (aName.hashCode % 7) / 7.0) % 1.0;
       final pos = _quadPoint(pa, control, pb, t);
-      _glowDot(canvas, pos, 3.2, _cyan, 0.9);
+      _glowDot(canvas, pos, 3.6, _cyan, 0.95);
     }
   }
 
@@ -280,15 +280,24 @@ class _GlobePainter extends CustomPainter {
       final pulse = 0.5 + 0.5 * math.sin(time * 2 * math.pi * 2 + c.lat);
       switch (c.type) {
         case CityType.hub:
-          _glowDot(canvas, p, 3.0, _hubColor, 0.95);
+          _glowDot(canvas, p, 3.6, _hubColor, 0.95);
           break;
         case CityType.node:
-          _glowDot(canvas, p, 2.2, _nodeColor, 0.85);
+          _glowDot(canvas, p, 2.6, _nodeColor, 0.85);
           break;
         case CityType.hot:
-          // 热点：橙色 + 脉冲外圈
-          _glowDot(canvas, p, 3.4, _hotColor, 1.0);
-          _glowDot(canvas, p, 6.5 + pulse * 3.0, _hotColor, 0.30);
+          // 热点：橙色核心 + 脉冲光晕 + 描边定位环（醒目）
+          _glowDot(canvas, p, 4.6, _hotColor, 1.0);
+          _glowDot(canvas, p, 9.0 + pulse * 4.5, _hotColor, 0.42);
+          canvas.drawCircle(
+            p,
+            6.2 + pulse * 2.2,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.1
+              ..color = _hotColor.withValues(alpha: 0.75)
+              ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
+          );
           break;
       }
     }
