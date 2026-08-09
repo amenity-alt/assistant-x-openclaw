@@ -1912,7 +1912,10 @@ class VoiceAssistant:
                         self.last_voice_time = time.time()
                         if not self._suppress_recognition_until_tts_done:
                             print(f"\r✓ 识别: {result}", end="", flush=True)
-                        self.visual.show_user_text(result)
+                        # 地图类指令在流式阶段不刷输入框（避免 ASR 回声把话术重复打入），
+                        # 最终判定为真指令时在下方统一显示一次。
+                        if not self._map_like(result):
+                            self.visual.show_user_text(result)
 
                     _early_recog = (
                         recognition_result.strip() if recognition_result else ""
@@ -2049,7 +2052,10 @@ class VoiceAssistant:
 
                             # 地图指令（定位/缩放/重置）→ 直接驱动 overlay，不进大模型
                             if self._handle_map_command(recognition_result):
+                                if self._map_show_user_text:
+                                    self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
                                 start_audio_stream()
                                 continue
 
@@ -2615,7 +2621,14 @@ class VoiceAssistant:
     _map_locating = False
     _map_locate_deadline = 0.0
     _map_locating_city = ""  # 当前定位的城市（用于识别同城市回声）
-    _MAP_LOCATE_TIMEOUT = 15.0  # 定位窗口：期间吞掉回声碎片
+    _map_locating_key = ""  # 当前定位城市的比较键（提取最具体城市名）
+    _map_located_city = ""  # 最近一次成功定位的城市（用于长时间同城去重）
+    _map_located_key = ""
+    _map_located_ts = 0.0
+    _map_show_user_text = False  # 本次地图指令是否是真指令（回声吞掉时不显示输入框）
+    _MAP_LOCATE_TIMEOUT = 45.0  # 定位窗口：期间吞掉回声碎片
+    _MAP_DEDUP_TTL = 45.0  # 同指令去重时长（ASR 回声/流式重发持续数十秒）
+    _MAP_SAME_CITY_TTL = 120.0  # 成功定位后同城市再触发的最小间隔
 
     def _map_norm(self, t: str) -> str:
         """归一化地图指令文本（剥离助词/尾部噪音），用于回声去重。"""
@@ -2632,6 +2645,14 @@ class VoiceAssistant:
         """定位窗口内的回声/碎片判定。"""
         return self._MAP_FRAGMENT_RE.search(t) is not None
 
+    def _map_like(self, t: str) -> bool:
+        """流式识别阶段的轻量地图指令预判（避免回声把文字刷进输入框）。"""
+        return bool(
+            "定位" in t
+            or self._MAP_RE_ZOOM.search(t)
+            or self._MAP_RE_RESET.search(t)
+        )
+
     def _map_clean_city(self, candidate: str) -> str:
         """从 ASR 提取的地点名中归一化出真实地名。
         短且干净（≤6字）直接使用；含明显噪音时取已知城市名
@@ -2639,6 +2660,12 @@ class VoiceAssistant:
         c = self._map_norm(candidate)
         if len(c) <= 6:
             return c
+        return self._map_city_key(c)
+
+    def _map_city_key(self, city: str) -> str:
+        """城市比较键：从候选里提取已知城市名（同长取最靠右=更具体），
+        用于判断"深圳宝安"与"宝安"是否同一城市。"""
+        c = self._map_norm(city)
         best, best_len, best_pos = "", 0, -1
         for name in self._MAP_CITY_NAMES:
             pos = c.find(name)
@@ -2661,6 +2688,7 @@ class VoiceAssistant:
         t = (text or "").strip()
         if not t:
             return False
+        self._map_show_user_text = False
         now = time.time()
         norm = self._map_norm(t)
         # 定位窗口内：缩放/重置正常放行；其他文本视为回声碎片吞掉
@@ -2670,7 +2698,7 @@ class VoiceAssistant:
                 pass  # 走下方 zoom/reset 分支
             elif "定位" in t:
                 c = self._map_extract_city(t)
-                if c and c == self._map_locating_city:
+                if c and self._map_city_key(c) == self._map_locating_key:
                     print(f"[Map] 定位中，吞掉回声: {t}")
                     return True
                 self._map_locating = False  # 换地点/新指令，放行
@@ -2680,7 +2708,7 @@ class VoiceAssistant:
             else:
                 self._map_locating = False  # 全新指令，放行并结束定位窗口
         # 去重：同一（归一化）指令 15 秒内重复（回声/流式重发）→ 忽略但仍消费
-        if norm == self._last_map_norm and now - self._last_map_ts < 15.0:
+        if norm == self._last_map_norm and now - self._last_map_ts < self._MAP_DEDUP_TTL:
             print(f"[Map] 重复指令忽略: {t}")
             return True
         self._last_map_norm = norm
@@ -2690,21 +2718,32 @@ class VoiceAssistant:
             direction = "放大" if ("放大" in t) else "缩小"
             self.visual.send("map_zoom +" if direction == "放大" else "map_zoom -")
             print(f"[Map] 缩放指令: {direction}")
+            self._map_show_user_text = True
             return True
         if self._MAP_RE_RESET.search(t):
             self.visual.send("map_reset")
             self._map_locating = False
             print("[Map] 重置地图")
+            self._map_show_user_text = True
             return True
         # 定位：定位(到/去)城市（先剥离"请/帮我/一下"等口语助词，再贪婪取地名）
         if "定位" in t:
             city = self._map_extract_city(t)
             if city:
+                # 最近已成功定位过同一城市 → 视为回声，不再重复定位
+                if (
+                    self._map_city_key(city) == self._map_located_key
+                    and now - self._map_located_ts < self._MAP_SAME_CITY_TTL
+                ):
+                    print(f"[Map] 同城市已定位，忽略重复: {city}")
+                    return True
                 # 进入定位窗口：期间吞掉回声，避免反复触发闪烁
                 self._map_locating = True
                 self._map_locating_city = city
+                self._map_locating_key = self._map_city_key(city)
                 self._map_locate_deadline = now + self._MAP_LOCATE_TIMEOUT
                 print(f"[Map] 定位到: {city}")
+                self._map_show_user_text = True
                 # 先用本地城市表快速定位，后台天地图地理编码解析出精确坐标后覆盖
                 self.visual.send(f"map_locate {city}")
                 threading.Thread(
@@ -2727,6 +2766,16 @@ class VoiceAssistant:
                     self.visual.send(f"map_locate {lat:.6f},{lon:.6f},{city}")
                     print(f"[Map] 精确定位 {city}: {lat:.6f},{lon:.6f}")
                     self._map_locating = False
+                    self._map_located_city = city
+                    self._map_located_key = self._map_city_key(city)
+                    self._map_located_ts = time.time()
+                    # 定位成功后直接回复用户（Jarvis 英文口播）
+                    self.visual.show_ai_text(f"LOCATED · {city}")
+                    threading.Thread(
+                        target=self._map_speak,
+                        args=(f"Located at {city}",),
+                        daemon=True,
+                    ).start()
                     return
                 print(f"[Map] 地理编码未命中（第 {attempt} 次）: {city}")
             except Exception as e:
@@ -2742,10 +2791,21 @@ class VoiceAssistant:
         self.visual.send("map_reset")
         self.visual.show_ai_text("LOCATION FAILED · 定位失败，请换一个更具体的地点")
         threading.Thread(
-            target=text_to_speech_play,
-            args=("定位失败，请换一个更具体的地点试试",),
+            target=self._map_speak,
+            args=("Location failed. Please try a more specific place.",),
             daemon=True,
         ).start()
+
+    def _map_speak(self, text: str):
+        """定位结果播报：播报期间标记处理中（主循环只等唤醒词打断），
+        播完复位并清空音频队列，避免播报内容被麦克风拾取后误识别。"""
+        self._is_processing = True
+        try:
+            text_to_speech_play(text)
+        finally:
+            self._clear_queue()
+            self.last_voice_time = time.time()
+            self._is_processing = False
 
     def _fetch_city_news_async(self, city: str):
         """后台抓取城市热点并推送给 overlay 展示。"""
