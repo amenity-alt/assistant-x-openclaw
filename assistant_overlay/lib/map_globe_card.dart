@@ -186,7 +186,10 @@ class MapGlobeController extends ChangeNotifier {
 
   void setNews(String city, List<MapNewsItem> items) {
     news = items;
-    locatedCity = city;
+    // 全球资讯（city 为空）不覆盖已定位城市；仅真实城市定位才更新标签
+    if (city.isNotEmpty) {
+      locatedCity = city;
+    }
     notifyListeners();
   }
 }
@@ -274,12 +277,14 @@ class _GlobePainter extends CustomPainter {
   final double zoom; // 1.0~3.0
   final double lat0;
   final double lon0;
+  final double rotationDeg; // 自转累积角度（度），持续增长、无跳变
 
   _GlobePainter({
     required this.time,
     required this.zoom,
     required this.lat0,
     required this.lon0,
+    required this.rotationDeg,
   });
 
   static const _cyan = Color(0xFF35D0FF);
@@ -294,10 +299,9 @@ class _GlobePainter extends CustomPainter {
     try {
       final c = size.center(Offset.zero);
       final R = math.min(size.width, size.height) * 0.42 * zoom;
-      // 自转：10 秒动画循环 × 90° → 约 40 秒/圈，特征从左向右移动（顺地球自转）
-      final rotation = -time * 90.0;
-      final proj =
-          _OrthoProjector(radius: R, center: c, lat0: lat0, lon0: lon0 + rotation);
+      // 自转：连续累积角度（约 1.2°/s → 5 分钟/圈），缓缓转动、无循环跳变
+      final proj = _OrthoProjector(
+          radius: R, center: c, lat0: lat0, lon0: lon0 - rotationDeg);
 
       _paintEarth(canvas, c, R);
       _paintLand(canvas, proj);
@@ -583,7 +587,11 @@ class _GlobePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _GlobePainter old) =>
-      old.time != time || old.zoom != zoom || old.lat0 != lat0 || old.lon0 != lon0;
+      old.time != time ||
+      old.zoom != zoom ||
+      old.lat0 != lat0 ||
+      old.lon0 != lon0 ||
+      old.rotationDeg != rotationDeg;
 }
 
 /// ── 天地图（Tianditu）瓦片地图 ───────────────────────────────────────
@@ -858,6 +866,8 @@ class _MapGlobeCardState extends State<MapGlobeCard>
   late final AnimationController _view;
   late final CurvedAnimation _viewCurve;
   late MapGlobeController _controller;
+  // 自转计时器：连续累积角度，避免动画循环回跳
+  final Stopwatch _rotWatch = Stopwatch()..start();
 
   // 视图状态机（飞行动画）：begin=动画起点，target=目标。
   // 画笔参数在 AnimatedBuilder 的 builder 内每帧按 _viewCurve.value 计算，
@@ -1088,12 +1098,15 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                             }
                             // 画笔参数在每帧 tick 内计算，飞行动画才真正动起来
                             final vt = _viewCurve.value;
+                            final rotationDeg =
+                                _rotWatch.elapsedMilliseconds / 1000.0 * 1.2;
                             return CustomPaint(
                               painter: _GlobePainter(
                                 time: _anim.value,
                                 zoom: _lerp(_beginZoom, _targetZoom, vt),
                                 lat0: _lerp(_beginLat, _targetLat, vt),
                                 lon0: _lerp(_beginLon, _targetLon, vt),
+                                rotationDeg: rotationDeg,
                               ),
                               size: Size.infinite,
                             );
@@ -1243,6 +1256,7 @@ class _NewsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final city = controller.locatedCity;
     final items = controller.news;
+    final isCity = city != null && city.isNotEmpty;
     return Container(
       decoration: BoxDecoration(
         color: const Color(0x140D67BC),
@@ -1254,13 +1268,15 @@ class _NewsPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _MiniHeader(city == null ? 'HOT SIGNAL' : '📍 $city 热点'),
+          _MiniHeader(isCity
+              ? '📍 $city 热点'
+              : (items.isEmpty ? 'HOT SIGNAL' : 'GLOBAL NEWS · 全球要闻')),
           const SizedBox(height: 6),
           Expanded(
             child: items.isEmpty
                 ? Center(
                     child: Text(
-                      city == null ? '未定位 · 说"定位到城市"' : '获取最新资讯中...',
+                      isCity ? '获取最新资讯中...' : '未定位 · 说"定位到城市"',
                       style: TextStyle(
                         color: const Color(0xFF5F87B8).withValues(alpha: 0.9),
                         fontSize: 9,

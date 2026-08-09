@@ -1855,6 +1855,10 @@ class VoiceAssistant:
                                 speech_started = False
 
                             self.visual.show_wake_effect()
+                            # 唤醒时推送全球热点资讯到地图球体右侧面板（后台抓取）
+                            threading.Thread(
+                                target=self._push_global_news, daemon=True
+                            ).start()
                             # 唤醒后发"voice-assistant-wake-up"给后端引擎，由引擎返回
                             # 问候播报。改为在线程里跑 + 立即恢复音频流，支持唤醒后打断。
                             _wake_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2657,6 +2661,21 @@ class VoiceAssistant:
             print(f"[Map] 已推送 {city} 资讯 {len(items)} 条")
         except Exception as e:
             print(f"[MapNews] 异常: {e}")
+
+    def _push_global_news(self):
+        """后台抓取全球热点资讯并推送给 overlay（球体右侧资讯面板）。"""
+        try:
+            from map_news import fetch_global_news
+
+            items = fetch_global_news(limit=4)
+            if not items:
+                print("[MapNews] 全球资讯为空，跳过推送")
+                return
+            payload = json.dumps({"city": "", "items": items}, ensure_ascii=False)
+            self.visual.send(f"map_news {payload}")
+            print(f"[Map] 已推送全球资讯 {len(items)} 条")
+        except Exception as e:
+            print(f"[MapNews] 全球资讯异常: {e}")
 
     def _restart_assistant(self):
         """重启语音助手：执行 start.sh 或 start.bat 脚本"""

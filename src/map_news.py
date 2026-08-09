@@ -133,6 +133,83 @@ def _deepseek(city: str, limit: int) -> list:
     return items
 
 
+def _deepseek_global(limit: int) -> list:
+    key = _deepseek_key()
+    if not key:
+        return []
+    prompt = (
+        f"请用简体中文提供当前全球最重要的{limit}条新闻要闻，"
+        "每条严格一行，格式为：标题|来源或媒体名。只输出资讯，不要序号以外的说明。"
+    )
+    r = requests.post(
+        DEEPSEEK_URL,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 400,
+            "temperature": 0.7,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+    items: list = []
+    for line in content.splitlines():
+        line = re.sub(r"^\s*[\d一二三四五六七八九十]+[.、)]\s*", "", line).strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        title = parts[0].strip()
+        if not title:
+            continue
+        src = parts[1].strip() if len(parts) > 1 else "AI 摘要"
+        items.append(
+            {"title": title, "source": src, "time": time.strftime("%H:%M")}
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+# 全球资讯缓存（10 分钟 TTL），避免每次唤醒都重新抓取
+_GLOBAL_CACHE: list = []
+_GLOBAL_CACHE_TS: float = 0.0
+_GLOBAL_CACHE_TTL = 600.0
+
+
+def fetch_global_news(limit: int = 4) -> list:
+    """抓取全球当前热点资讯（球体右侧资讯面板），全部失败返回空列表。"""
+    global _GLOBAL_CACHE, _GLOBAL_CACHE_TS
+    now = time.time()
+    if _GLOBAL_CACHE and now - _GLOBAL_CACHE_TS < _GLOBAL_CACHE_TTL:
+        return _GLOBAL_CACHE[:limit]
+    items: list = []
+    for q in ("国际", "全球热点", "世界新闻", "国际要闻"):
+        try:
+            items = _bing(q, limit)
+            if items:
+                print(f"[MapNews] global bing({q}) -> {len(items)} 条")
+                break
+        except Exception as e:
+            print(f"[MapNews] global bing({q}) 失败: {e}")
+    if not items:
+        try:
+            items = _baidu("全球热点", limit)
+            if items:
+                print(f"[MapNews] global baidu -> {len(items)} 条")
+        except Exception as e:
+            print(f"[MapNews] global baidu 失败: {e}")
+    if not items:
+        items = _deepseek_global(limit)
+        if items:
+            print(f"[MapNews] global deepseek -> {len(items)} 条")
+    if items:
+        _GLOBAL_CACHE = items
+        _GLOBAL_CACHE_TS = now
+    return items
+
+
 def fetch_city_news(city: str, limit: int = 4) -> list:
     """按优先级抓取城市热点资讯，全部失败返回空列表。"""
     city = (city or "").strip()
