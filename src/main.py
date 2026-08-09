@@ -2594,22 +2594,64 @@ class VoiceAssistant:
     _MAP_CITY_TAIL = re.compile(
         r"(的|好了|好吧|吧|啊|哦|呀|呢|谢谢|感谢|地图|最新|热点|资讯|新闻|NIC)$"
     )
-    # 最近一次地图指令去重（ASR 回声/流式重发时 3 秒内只执行一次）
-    _last_map_cmd = ""
-    _last_map_cmd_ts = 0.0
+    # 定位窗口内"回声碎片"判定：含地点/语气/指令词，或短中文句
+    _MAP_FRAGMENT_RE = re.compile(
+        r"定位|地图|放大|缩小|关闭|重置|恢复|取消|深圳|北京|上海|广州|杭州|成都|"
+        r"重庆|武汉|西安|南京|天津|苏州|青岛|厦门|长沙|郑州|合肥|昆明|大连|海口|"
+        r"哈尔滨|台北|香港|澳门|宝安|南山|福田|龙岗|盐田|罗湖|好了|NIC|吧|啊|哦|"
+        r"呀|呢|谢谢|感谢"
+    )
+    # 地图指令状态机：防 ASR 回声/流式重发导致反复定位闪烁、永不退出
+    _last_map_norm = ""
+    _last_map_ts = 0.0
+    _map_locating = False
+    _map_locate_deadline = 0.0
+    _MAP_LOCATE_TIMEOUT = 15.0  # 定位窗口：期间吞掉回声碎片
+
+    def _map_norm(self, t: str) -> str:
+        """归一化地图指令文本（剥离助词/尾部噪音），用于回声去重。"""
+        t = self._MAP_RE_CLEAN.sub("", t)
+        # 迭代清理尾部语气词/噪音（处理"好了 NIC"这类带空格残留）
+        for _ in range(4):
+            nxt = self._MAP_CITY_TAIL.sub("", t).strip()
+            if nxt == t:
+                break
+            t = nxt
+        return t
+
+    def _map_fragment(self, t: str) -> bool:
+        """定位窗口内的回声/碎片判定。"""
+        return self._MAP_FRAGMENT_RE.search(t) is not None
 
     def _handle_map_command(self, text: str) -> bool:
         """识别地图指令（语音驱动 overlay）：返回 True 表示已消费，不再进大模型。"""
         t = (text or "").strip()
         if not t:
             return False
-        # 去重：同一句指令 3 秒内重复（回声/流式重发）→ 忽略但仍消费
         now = time.time()
-        if t == self._last_map_cmd and now - self._last_map_cmd_ts < 3.0:
+        norm = self._map_norm(t)
+        # 定位窗口内：缩放/重置正常放行；其他文本视为回声碎片吞掉
+        if self._map_locating and now < self._map_locate_deadline:
+            if (self._MAP_RE_RESET.search(t)
+                    or self._MAP_RE_ZOOM.search(t) or t in ("放大", "缩小")):
+                pass  # 走下方 zoom/reset 分支
+            elif "定位" in t:
+                if norm != self._last_map_norm:
+                    self._map_locating = False  # 用户换地点，放行新定位
+                else:
+                    print(f"[Map] 定位中，吞掉回声: {t}")
+                    return True
+            elif self._map_fragment(t):
+                print(f"[Map] 定位中，吞掉回声片段: {t}")
+                return True
+            else:
+                self._map_locating = False  # 全新指令，放行并结束定位窗口
+        # 去重：同一（归一化）指令 15 秒内重复（回声/流式重发）→ 忽略但仍消费
+        if norm == self._last_map_norm and now - self._last_map_ts < 15.0:
             print(f"[Map] 重复指令忽略: {t}")
             return True
-        self._last_map_cmd = t
-        self._last_map_cmd_ts = now
+        self._last_map_norm = norm
+        self._last_map_ts = now
         # 缩放：整句只有"放大/缩小"，或带"地图"二字
         if t in ("放大", "缩小") or self._MAP_RE_ZOOM.search(t):
             direction = "放大" if ("放大" in t) else "缩小"
@@ -2618,6 +2660,7 @@ class VoiceAssistant:
             return True
         if self._MAP_RE_RESET.search(t):
             self.visual.send("map_reset")
+            self._map_locating = False
             print("[Map] 重置地图")
             return True
         # 定位：定位(到/去)城市（先剥离"请/帮我/一下"等口语助词，再贪婪取地名）
@@ -2625,8 +2668,11 @@ class VoiceAssistant:
             cleaned = self._MAP_RE_CLEAN.sub("", t)
             m = self._MAP_RE_LOCATE.search(cleaned)
             if m:
-                city = self._MAP_CITY_TAIL.sub("", m.group(1)).strip()
+                city = self._map_norm(m.group(1))
                 if city:
+                    # 进入定位窗口：期间吞掉回声，避免反复触发闪烁
+                    self._map_locating = True
+                    self._map_locate_deadline = now + self._MAP_LOCATE_TIMEOUT
                     print(f"[Map] 定位到: {city}")
                     # 先用本地城市表快速定位，后台天地图地理编码解析出精确坐标后覆盖
                     self.visual.send(f"map_locate {city}")
@@ -2640,15 +2686,35 @@ class VoiceAssistant:
         return False
 
     def _geocode_and_locate(self, city: str):
-        """后台：天地图解析精确经纬度 → map_locate lat,lon,name 覆盖定位。"""
-        try:
-            ll = _geocode_city(city)
-            if ll:
-                lat, lon = ll
-                self.visual.send(f"map_locate {lat:.6f},{lon:.6f},{city}")
-                print(f"[Map] 精确定位 {city}: {lat:.6f},{lon:.6f}")
-        except Exception as e:
-            print(f"[Map] geocode-and-locate 异常: {e}")
+        """后台：天地图解析精确经纬度 → map_locate lat,lon,name 覆盖定位。
+        失败自动重试一次；仍失败则重置地图并播报定位失败（不再反复定位）。"""
+        for attempt in (1, 2):
+            try:
+                ll = _geocode_city(city)
+                if ll:
+                    lat, lon = ll
+                    self.visual.send(f"map_locate {lat:.6f},{lon:.6f},{city}")
+                    print(f"[Map] 精确定位 {city}: {lat:.6f},{lon:.6f}")
+                    self._map_locating = False
+                    return
+                print(f"[Map] 地理编码未命中（第 {attempt} 次）: {city}")
+            except Exception as e:
+                print(f"[Map] geocode-and-locate 异常（第 {attempt} 次）: {e}")
+            if attempt == 1:
+                time.sleep(1.5)
+        self._map_locate_fail(city)
+
+    def _map_locate_fail(self, city: str):
+        """定位失败：重置地图并播报失败，退出定位状态。"""
+        self._map_locating = False
+        print(f"[Map] 定位失败，退出定位: {city}")
+        self.visual.send("map_reset")
+        self.visual.show_ai_text("LOCATION FAILED · 定位失败，请换一个更具体的地点")
+        threading.Thread(
+            target=text_to_speech_play,
+            args=("定位失败，请换一个更具体的地点试试",),
+            daemon=True,
+        ).start()
 
     def _fetch_city_news_async(self, city: str):
         """后台抓取城市热点并推送给 overlay 展示。"""

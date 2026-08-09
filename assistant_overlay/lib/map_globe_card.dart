@@ -175,6 +175,13 @@ class MapGlobeController extends ChangeNotifier {
   }
 
   void locateTo(double lat, double lon, String city) {
+    // 同一坐标重复定位（回声/重发）→ 跳过，避免反复飞行动画闪烁
+    if (mode == MapMode.tianditu &&
+        (lat - targetLat).abs() < 0.0001 &&
+        (lon - targetLon).abs() < 0.0001 &&
+        locatedCity == city) {
+      return;
+    }
     mode = MapMode.tianditu;
     targetLat = lat;
     targetLon = lon;
