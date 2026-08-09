@@ -243,16 +243,21 @@ class _GlobePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final c = size.center(Offset.zero);
-    final R = math.min(size.width, size.height) * 0.42 * zoom;
-    final proj = _OrthoProjector(radius: R, center: c, lat0: lat0, lon0: lon0);
+    // 绘制异常兜底：绝不抛给渲染管线，避免整卡变黑或动画中断
+    try {
+      final c = size.center(Offset.zero);
+      final R = math.min(size.width, size.height) * 0.42 * zoom;
+      final proj = _OrthoProjector(radius: R, center: c, lat0: lat0, lon0: lon0);
 
-    _paintEarth(canvas, c, R);
-    _paintGrid(canvas, proj, zoom);
-    _paintArcs(canvas, proj, time);
-    _paintNodes(canvas, proj, time);
-    _paintScanRing(canvas, c, R, time);
-    _paintParticles(canvas, c, R, time);
+      _paintEarth(canvas, c, R);
+      _paintGrid(canvas, proj, zoom);
+      _paintArcs(canvas, proj, time);
+      _paintNodes(canvas, proj, time);
+      _paintScanRing(canvas, c, R, time);
+      _paintParticles(canvas, c, R, time);
+    } catch (e) {
+      debugPrint('[Globe] paint error: $e');
+    }
   }
 
   void _paintEarth(Canvas canvas, Offset c, double R) {
@@ -356,7 +361,9 @@ class _GlobePainter extends CustomPainter {
       final gap = 3.5;
       final total = dash + gap;
       final offset = (time * 90.0 + (aName.hashCode % 20)) % total;
-      final metric = path.computeMetrics().first;
+      final metrics = path.computeMetrics();
+      if (metrics.isEmpty) continue;
+      final metric = metrics.first;
       final dashPaint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.3
@@ -505,41 +512,65 @@ class _MapGlobeCardState extends State<MapGlobeCard>
   late final CurvedAnimation _viewCurve;
   late MapGlobeController _controller;
 
-  late Tween<double> _zoomTween;
-  late Tween<double> _latTween;
-  late Tween<double> _lonTween;
+  // 视图状态机（飞行动画）：begin=动画起点，target=目标。
+  // 画笔参数在 AnimatedBuilder 的 builder 内每帧按 _viewCurve.value 计算，
+  // 而不是在 build() 里算好再传进闭包（否则动画期间画笔始终用旧值，表现为"卡住"）。
+  double _beginZoom = 1.0;
+  double _beginLat = 20.0;
+  double _beginLon = 105.0;
+  double _targetZoom = 1.0;
+  double _targetLat = 20.0;
+  double _targetLon = 105.0;
 
   int _flow = 9;
   int _agents = 6;
   String _risk = 'LOW';
 
+  static double _lerp(double a, double b, double t) => a + (b - a) * t;
+
   @override
   void initState() {
     super.initState();
     _controller = widget.controller;
+    _targetZoom = _controller.targetZoom;
+    _targetLat = _controller.targetLat;
+    _targetLon = _controller.targetLon;
     _anim = AnimationController(vsync: this, duration: const Duration(seconds: 10))
       ..repeat();
     _view = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 900));
+        vsync: this, duration: const Duration(milliseconds: 800));
     _viewCurve = CurvedAnimation(parent: _view, curve: Curves.easeInOutCubic);
-    _zoomTween = Tween(begin: 1.0, end: _controller.targetZoom);
-    _latTween = Tween(begin: 20.0, end: _controller.targetLat);
-    _lonTween = Tween(begin: 105.0, end: _controller.targetLon);
     _controller.addListener(_onViewChanged);
     _startStatsTimer();
   }
 
   void _onViewChanged() {
     if (!mounted) return;
-    setState(() {
-      final z = _zoomTween.evaluate(_viewCurve);
-      final la = _latTween.evaluate(_viewCurve);
-      final lo = _lonTween.evaluate(_viewCurve);
-      _zoomTween = Tween(begin: z, end: _controller.targetZoom);
-      _latTween = Tween(begin: la, end: _controller.targetLat);
-      _lonTween = Tween(begin: lo, end: _controller.targetLon);
-      _view.forward(from: 0);
-    });
+    try {
+      // 命令到达瞬间的当前显示值 = 下一段动画的起点（动画中也能平滑改道）
+      final t = _viewCurve.value;
+      final z = _lerp(_beginZoom, _targetZoom, t);
+      final la = _lerp(_beginLat, _targetLat, t);
+      final lo = _lerp(_beginLon, _targetLon, t);
+      final tz = _controller.targetZoom;
+      final tla = _controller.targetLat;
+      final tlo = _controller.targetLon;
+      final moved = tz != _targetZoom || tla != _targetLat || tlo != _targetLon;
+      setState(() {
+        _beginZoom = z;
+        _beginLat = la;
+        _beginLon = lo;
+        _targetZoom = tz;
+        _targetLat = tla;
+        _targetLon = tlo;
+      });
+      // 仅视图变化（定位/缩放/重置）才重启飞行；map_news 只刷新资讯面板不动地图
+      if (moved) {
+        _view.forward(from: 0);
+      }
+    } catch (e) {
+      debugPrint('[Globe] view change error: $e');
+    }
   }
 
   void _startStatsTimer() {
@@ -564,9 +595,9 @@ class _MapGlobeCardState extends State<MapGlobeCard>
 
   @override
   Widget build(BuildContext context) {
-    final zoom = _zoomTween.evaluate(_viewCurve);
-    final lat = _latTween.evaluate(_viewCurve);
-    final lon = _lonTween.evaluate(_viewCurve);
+    // 供底部 ZOOM 读数使用的当前值（随卡片级 setState 更新即可）
+    final t = _viewCurve.value;
+    final zoom = _lerp(_beginZoom, _targetZoom, t);
 
     return HudTerminalShell(
       title: 'GLOBAL SATCOM',
@@ -591,12 +622,14 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                         child: AnimatedBuilder(
                           animation: Listenable.merge([_anim, _view]),
                           builder: (context, child) {
+                            // 画笔参数在每帧 tick 内计算，飞行动画才真正动起来
+                            final vt = _viewCurve.value;
                             return CustomPaint(
                               painter: _GlobePainter(
                                 time: _anim.value,
-                                zoom: zoom,
-                                lat0: lat,
-                                lon0: lon,
+                                zoom: _lerp(_beginZoom, _targetZoom, vt),
+                                lat0: _lerp(_beginLat, _targetLat, vt),
+                                lon0: _lerp(_beginLon, _targetLon, vt),
                               ),
                               size: Size.infinite,
                             );
