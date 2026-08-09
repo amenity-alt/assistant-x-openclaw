@@ -643,21 +643,24 @@ class JarvisAgentVisual implements AgentVisual {
         final lon = double.tryParse(parts[1].trim());
         if (lat != null && lon != null) {
           final name = parts.length >= 3 ? parts.sublist(2).join(',').trim() : '';
+          // 用城市表清洗地名：ASR 噪音（如"深圳的话我们"）→ 标准城市名
+          final hit = name.isEmpty ? null : locateCityZh(name);
+          final display = hit != null ? hit.name : (name.isEmpty ? 'LOCATION' : name);
           // 合法性钳制，避免异常坐标导致投影计算出错
           _mapController.locateTo(
             lat.clamp(-90.0, 90.0),
             lon.clamp(-180.0, 180.0),
-            name.isEmpty ? 'LOCATION' : name,
+            display,
           );
-          print('[Map] locate precise: $name ($lat, $lon)');
+          print('[Map] locate precise: $display ($lat, $lon)');
         } else {
           _fallbackLocate(arg);
         }
       } else {
         final hit = locateCityZh(arg);
         if (hit != null) {
-          _mapController.locateTo(hit.lat, hit.lon, arg);
-          print('[Map] locate: $arg');
+          _mapController.locateTo(hit.lat, hit.lon, hit.name);
+          print('[Map] locate: ${hit.name}');
         } else {
           _fallbackLocate(arg);
         }

@@ -195,7 +195,7 @@ class MapGlobeController extends ChangeNotifier {
 }
 
 /// 中文城市名 → 坐标（定位用；支持简称/带市后缀/英文名）
-({double lat, double lon})? locateCityZh(String query) {
+({double lat, double lon, String name})? locateCityZh(String query) {
   final q = query.trim().replaceAll('市', '').toLowerCase();
   if (q.isEmpty) return null;
   _City? best;
@@ -204,14 +204,14 @@ class MapGlobeController extends ChangeNotifier {
     final zh = c.zh.toLowerCase();
     final en = c.name.toLowerCase();
     if (zh == q || en == q) {
-      return (lat: c.lat, lon: c.lon);
+      return (lat: c.lat, lon: c.lon, name: c.zh);
     }
     if (q.contains(zh) && zh.length > bestLen) {
       best = c;
       bestLen = zh.length;
     }
   }
-  if (best != null) return (lat: best.lat, lon: best.lon);
+  if (best != null) return (lat: best.lat, lon: best.lon, name: best.zh);
   return null;
 }
 
