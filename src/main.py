@@ -2598,14 +2598,23 @@ class VoiceAssistant:
     _MAP_FRAGMENT_RE = re.compile(
         r"定位|地图|放大|缩小|关闭|重置|恢复|取消|深圳|北京|上海|广州|杭州|成都|"
         r"重庆|武汉|西安|南京|天津|苏州|青岛|厦门|长沙|郑州|合肥|昆明|大连|海口|"
-        r"哈尔滨|台北|香港|澳门|宝安|南山|福田|龙岗|盐田|罗湖|好了|NIC|吧|啊|哦|"
+        r"哈尔滨|台北|香港|澳门|宝安|南山|福田|龙岗|盐田|罗湖|光明|坪山|龙华|大鹏|好了|NIC|吧|啊|哦|"
         r"呀|呢|谢谢|感谢"
+    )
+    # 已知城市/片区名：用于从 ASR 乱码中提取真实地名（避免定位误报失败）
+    _MAP_CITY_NAMES = (
+        "哈尔滨", "乌鲁木齐", "呼和浩特", "石家庄", "郑州", "长春", "沈阳", "济南",
+        "南京", "武汉", "成都", "重庆", "西安", "天津", "苏州", "青岛", "厦门",
+        "长沙", "杭州", "昆明", "大连", "海口", "合肥", "广州", "深圳", "北京",
+        "上海", "台北", "香港", "澳门",
+        "宝安", "南山", "福田", "龙岗", "盐田", "罗湖", "光明", "坪山", "龙华", "大鹏",
     )
     # 地图指令状态机：防 ASR 回声/流式重发导致反复定位闪烁、永不退出
     _last_map_norm = ""
     _last_map_ts = 0.0
     _map_locating = False
     _map_locate_deadline = 0.0
+    _map_locating_city = ""  # 当前定位的城市（用于识别同城市回声）
     _MAP_LOCATE_TIMEOUT = 15.0  # 定位窗口：期间吞掉回声碎片
 
     def _map_norm(self, t: str) -> str:
@@ -2623,6 +2632,30 @@ class VoiceAssistant:
         """定位窗口内的回声/碎片判定。"""
         return self._MAP_FRAGMENT_RE.search(t) is not None
 
+    def _map_clean_city(self, candidate: str) -> str:
+        """从 ASR 提取的地点名中归一化出真实地名。
+        短且干净（≤6字）直接使用；含明显噪音时取已知城市名
+        （最长匹配，同长取最靠右 = 更具体片区，如"深圳宝安"→宝安）。"""
+        c = self._map_norm(candidate)
+        if len(c) <= 6:
+            return c
+        best, best_len, best_pos = "", 0, -1
+        for name in self._MAP_CITY_NAMES:
+            pos = c.find(name)
+            if pos >= 0 and (
+                len(name) > best_len or (len(name) == best_len and pos > best_pos)
+            ):
+                best, best_len, best_pos = name, len(name), pos
+        return best or c
+
+    def _map_extract_city(self, t: str) -> str:
+        """从一句定位指令中提取干净城市名（无匹配返回空串）。"""
+        cleaned = self._MAP_RE_CLEAN.sub("", t)
+        m = self._MAP_RE_LOCATE.search(cleaned)
+        if m:
+            return self._map_clean_city(m.group(1))
+        return ""
+
     def _handle_map_command(self, text: str) -> bool:
         """识别地图指令（语音驱动 overlay）：返回 True 表示已消费，不再进大模型。"""
         t = (text or "").strip()
@@ -2636,11 +2669,11 @@ class VoiceAssistant:
                     or self._MAP_RE_ZOOM.search(t) or t in ("放大", "缩小")):
                 pass  # 走下方 zoom/reset 分支
             elif "定位" in t:
-                if norm != self._last_map_norm:
-                    self._map_locating = False  # 用户换地点，放行新定位
-                else:
+                c = self._map_extract_city(t)
+                if c and c == self._map_locating_city:
                     print(f"[Map] 定位中，吞掉回声: {t}")
                     return True
+                self._map_locating = False  # 换地点/新指令，放行
             elif self._map_fragment(t):
                 print(f"[Map] 定位中，吞掉回声片段: {t}")
                 return True
@@ -2665,24 +2698,22 @@ class VoiceAssistant:
             return True
         # 定位：定位(到/去)城市（先剥离"请/帮我/一下"等口语助词，再贪婪取地名）
         if "定位" in t:
-            cleaned = self._MAP_RE_CLEAN.sub("", t)
-            m = self._MAP_RE_LOCATE.search(cleaned)
-            if m:
-                city = self._map_norm(m.group(1))
-                if city:
-                    # 进入定位窗口：期间吞掉回声，避免反复触发闪烁
-                    self._map_locating = True
-                    self._map_locate_deadline = now + self._MAP_LOCATE_TIMEOUT
-                    print(f"[Map] 定位到: {city}")
-                    # 先用本地城市表快速定位，后台天地图地理编码解析出精确坐标后覆盖
-                    self.visual.send(f"map_locate {city}")
-                    threading.Thread(
-                        target=self._fetch_city_news_async, args=(city,), daemon=True
-                    ).start()
-                    threading.Thread(
-                        target=self._geocode_and_locate, args=(city,), daemon=True
-                    ).start()
-                    return True
+            city = self._map_extract_city(t)
+            if city:
+                # 进入定位窗口：期间吞掉回声，避免反复触发闪烁
+                self._map_locating = True
+                self._map_locating_city = city
+                self._map_locate_deadline = now + self._MAP_LOCATE_TIMEOUT
+                print(f"[Map] 定位到: {city}")
+                # 先用本地城市表快速定位，后台天地图地理编码解析出精确坐标后覆盖
+                self.visual.send(f"map_locate {city}")
+                threading.Thread(
+                    target=self._fetch_city_news_async, args=(city,), daemon=True
+                ).start()
+                threading.Thread(
+                    target=self._geocode_and_locate, args=(city,), daemon=True
+                ).start()
+                return True
         return False
 
     def _geocode_and_locate(self, city: str):
