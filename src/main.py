@@ -2615,6 +2615,20 @@ class VoiceAssistant:
         "上海", "台北", "香港", "澳门",
         "宝安", "南山", "福田", "龙岗", "盐田", "罗湖", "光明", "坪山", "龙华", "大鹏",
     )
+    # 定位语音回复用英文地名（贾维斯英文口播走 Piper 英音；含中文会切女声）
+    _MAP_CITY_EN = {
+        "哈尔滨": "Harbin", "乌鲁木齐": "Urumqi", "呼和浩特": "Hohhot",
+        "石家庄": "Shijiazhuang", "郑州": "Zhengzhou", "长春": "Changchun",
+        "沈阳": "Shenyang", "济南": "Jinan", "南京": "Nanjing", "武汉": "Wuhan",
+        "成都": "Chengdu", "重庆": "Chongqing", "西安": "Xi'an", "天津": "Tianjin",
+        "苏州": "Suzhou", "青岛": "Qingdao", "厦门": "Xiamen", "长沙": "Changsha",
+        "杭州": "Hangzhou", "昆明": "Kunming", "大连": "Dalian", "海口": "Haikou",
+        "合肥": "Hefei", "广州": "Guangzhou", "深圳": "Shenzhen", "北京": "Beijing",
+        "上海": "Shanghai", "台北": "Taipei", "香港": "Hong Kong", "澳门": "Macau",
+        "宝安": "Bao'an", "南山": "Nanshan", "福田": "Futian", "龙岗": "Longgang",
+        "盐田": "Yantian", "罗湖": "Luohu", "光明": "Guangming", "坪山": "Pingshan",
+        "龙华": "Longhua", "大鹏": "Dapeng",
+    }
     # 地图指令状态机：防 ASR 回声/流式重发导致反复定位闪烁、永不退出
     _last_map_norm = ""
     _last_map_ts = 0.0
@@ -2674,6 +2688,20 @@ class VoiceAssistant:
             ):
                 best, best_len, best_pos = name, len(name), pos
         return best or c
+
+    def _map_city_en(self, city: str) -> str:
+        """定位语音回复用的英文地名（贾维斯英音）；无已知城市返回空串。
+        按出现位置取已知城市名，更具体（靠右）的在前：如"深圳宝安"→Bao'an, Shenzhen。"""
+        c = self._map_norm(city)
+        hits = []
+        for name in self._MAP_CITY_NAMES:
+            pos = c.find(name)
+            if pos >= 0:
+                hits.append((pos, name))
+        if not hits:
+            return ""
+        hits.sort(key=lambda x: -x[0])
+        return ", ".join(self._MAP_CITY_EN.get(n, n) for _, n in hits)
 
     def _map_extract_city(self, t: str) -> str:
         """从一句定位指令中提取干净城市名（无匹配返回空串）。"""
@@ -2771,9 +2799,11 @@ class VoiceAssistant:
                     self._map_located_ts = time.time()
                     # 定位成功后直接回复用户（Jarvis 英文口播）
                     self.visual.show_ai_text(f"LOCATED · {city}")
+                    _en = self._map_city_en(city)
+                    _spoken = f"Located at {_en}." if _en else "Located."
                     threading.Thread(
                         target=self._map_speak,
-                        args=(f"Located at {city}",),
+                        args=(_spoken,),
                         daemon=True,
                     ).start()
                     return
