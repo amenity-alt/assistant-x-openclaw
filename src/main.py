@@ -2551,7 +2551,10 @@ class VoiceAssistant:
 
     # ── 地图指令（定位 / 缩放 / 重置）────────────────────────────
     _MAP_RE_ZOOM = re.compile(r"放大地图|缩小地图|地图放大|地图缩小")
-    _MAP_RE_RESET = re.compile(r"重置地图|恢复地图|地图重置|地图恢复|取消定位|退出定位")
+    # "关闭地图" 也视为重置：收起定位视图，回到原始大小展示完整球体
+    _MAP_RE_RESET = re.compile(
+        r"重置地图|恢复地图|地图重置|地图恢复|取消定位|退出定位|关闭地图|收起地图"
+    )
 
     def _handle_map_command(self, text: str) -> bool:
         """识别地图指令（语音驱动 overlay）：返回 True 表示已消费，不再进大模型。"""

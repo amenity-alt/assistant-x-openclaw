@@ -586,6 +586,9 @@ class JarvisAgentVisual implements AgentVisual {
       _currentEffect = 'error';
     } else if (command == 'hide') {
       _mapVisible = false;
+      // 关闭地图时重置视图：下次唤醒回到原始大小、展示完整球体，
+      // 不再停留在上次定位的城市/缩放级别。
+      _mapController.reset();
       _currentEffect = 'hide';
       _isSpeaking = false;
       _isHiding = true;
