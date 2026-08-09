@@ -1071,10 +1071,12 @@ class JarvisAgentVisual implements AgentVisual {
         if (_mapVisible)
           Positioned(
             left: 80,
-            top: screenHeight * 0.10,
+            top: screenHeight * 0.05,
             child: MapGlobeCard(
-              width: screenWidth * 0.21,
-              height: screenWidth * 0.21 * 1.30,
+              width: screenWidth * 0.22,
+              // 高度上限 0.40 屏高：保证卡片底部始终在 SYSTEM STATUS
+              // 面板之上，任何分辨率都不会与下方状态框重叠。
+              height: math.min(screenWidth * 0.22 * 1.30, screenHeight * 0.40),
               controller: _mapController,
             ),
           ),

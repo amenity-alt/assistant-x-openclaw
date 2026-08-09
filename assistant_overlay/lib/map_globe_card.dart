@@ -572,60 +572,67 @@ class _MapGlobeCardState extends State<MapGlobeCard>
       title: 'GLOBAL SATCOM',
       width: widget.width,
       maxHeight: widget.height,
-      child: SizedBox(
-        width: widget.width - 32,
-        height: widget.height - 84,
-        child: Column(
-          children: [
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    flex: 56,
-                    child: AnimatedBuilder(
-                      animation: Listenable.merge([_anim, _view]),
-                      builder: (context, child) {
-                        return CustomPaint(
-                          painter: _GlobePainter(
-                            time: _anim.value,
-                            zoom: zoom,
-                            lat0: lat,
-                            lon0: lon,
-                          ),
-                          size: Size.infinite,
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    flex: 44,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(
-                          flex: 2,
-                          child: _MemoryLog(),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: SizedBox(
+          width: widget.width - 32,
+          height: widget.height - 84,
+          child: Column(
+            children: [
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      flex: 56,
+                      // 硬裁剪：地球绘制（辉光/扫描环/粒子/放大）严格限制在
+                      // 地图区域内，绝不溢出到资讯栏或卡片外。
+                      child: ClipRect(
+                        child: AnimatedBuilder(
+                          animation: Listenable.merge([_anim, _view]),
+                          builder: (context, child) {
+                            return CustomPaint(
+                              painter: _GlobePainter(
+                                time: _anim.value,
+                                zoom: zoom,
+                                lat0: lat,
+                                lon0: lon,
+                              ),
+                              size: Size.infinite,
+                            );
+                          },
                         ),
-                        const SizedBox(height: 6),
-                        Expanded(
-                          flex: 3,
-                          child: _NewsPanel(
-                            controller: _controller,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    Expanded(
+                      flex: 44,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            flex: 2,
+                            child: _MemoryLog(),
+                          ),
+                          const SizedBox(height: 6),
+                          Expanded(
+                            flex: 3,
+                            child: _NewsPanel(
+                              controller: _controller,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 6),
-            _StatsRow(flow: _flow, agents: _agents, risk: _risk, zoom: zoom),
-            const SizedBox(height: 6),
-            const _QuickButtons(),
-          ],
+              const SizedBox(height: 6),
+              _StatsRow(flow: _flow, agents: _agents, risk: _risk, zoom: zoom),
+              const SizedBox(height: 6),
+              const _QuickButtons(),
+            ],
+          ),
         ),
       ),
     );
