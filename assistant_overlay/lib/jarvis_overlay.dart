@@ -630,15 +630,27 @@ class JarvisAgentVisual implements AgentVisual {
       _mapController.reset();
       print('[Map] reset');
     } else if (command.startsWith('map_locate')) {
-      final city = command.substring(10).trim();
-      final hit = locateCityZh(city);
-      if (hit != null) {
-        _mapController.locateTo(hit.lat, hit.lon, city);
-        print('[Map] locate: $city');
+      final arg = command.substring(10).trim();
+      // 精确坐标格式："lat,lon,name"（天地图地理编码后台推送）
+      final parts = arg.split(',');
+      if (parts.length >= 2) {
+        final lat = double.tryParse(parts[0].trim());
+        final lon = double.tryParse(parts[1].trim());
+        if (lat != null && lon != null) {
+          final name = parts.length >= 3 ? parts.sublist(2).join(',').trim() : '';
+          _mapController.locateTo(lat, lon, name.isEmpty ? 'LOCATION' : name);
+          print('[Map] locate precise: $name ($lat, $lon)');
+        } else {
+          _fallbackLocate(arg);
+        }
       } else {
-        // 未收录城市：先飞往中国概览视角
-        _mapController.locateTo(35.0, 105.0, city);
-        print('[Map] locate unknown, fallback: $city');
+        final hit = locateCityZh(arg);
+        if (hit != null) {
+          _mapController.locateTo(hit.lat, hit.lon, arg);
+          print('[Map] locate: $arg');
+        } else {
+          _fallbackLocate(arg);
+        }
       }
     } else if (command.startsWith('map_news')) {
       final payload = command.substring(8).trim();
@@ -731,6 +743,12 @@ class JarvisAgentVisual implements AgentVisual {
       scrollToBottomOnNextFrame(_chatScrollController);
     }
   }
+  void _fallbackLocate(String city) {
+    // 未收录城市：先飞往中国概览视角（等地理编码精确坐标覆盖）
+    _mapController.locateTo(35.0, 105.0, city);
+    print('[Map] locate unknown, fallback: $city');
+  }
+
 
   void _updateOuterRingAngle() {
     final delta = _outerRingController.value - _lastOuterValue;
@@ -1076,10 +1094,10 @@ class JarvisAgentVisual implements AgentVisual {
             left: 80,
             top: screenHeight * 0.05,
             child: MapGlobeCard(
-              width: screenWidth * 0.22,
+              width: screenWidth * 0.28,
               // 高度上限 0.40 屏高：保证卡片底部始终在 SYSTEM STATUS
               // 面板之上，任何分辨率都不会与下方状态框重叠。
-              height: math.min(screenWidth * 0.22 * 1.30, screenHeight * 0.40),
+              height: math.min(screenWidth * 0.28 * 1.30, screenHeight * 0.40),
               controller: _mapController,
             ),
           ),

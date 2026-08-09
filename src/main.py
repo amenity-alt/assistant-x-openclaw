@@ -35,6 +35,29 @@ _assistant_instance = None
 PID_FILE = os.path.join(tempfile.gettempdir(), "voice_assistant.pid")
 API_PORT = 18790
 
+# 天地图（Tianditu）地理编码：任意地点名 → 经纬度，实现"具体地点定位"
+TIANDITU_KEY = "f6eff7213d1409c324f32588057ff535"
+_TDT_GEO_URL = "https://api.tianditu.gov.cn/geocoder"
+
+
+def _geocode_city(name: str):
+    """天地图地理编码：地点名 → (lat, lon)；失败返回 None。"""
+    try:
+        import urllib.parse
+        import urllib.request
+
+        ds = urllib.parse.quote(json.dumps({"keyWord": name}, ensure_ascii=False))
+        url = f"{_TDT_GEO_URL}?ds={ds}&tk={TIANDITU_KEY}"
+        with urllib.request.urlopen(url, timeout=6) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        loc = data.get("location") or {}
+        lon, lat = loc.get("lon"), loc.get("lat")
+        if lon is not None and lat is not None:
+            return float(lat), float(lon)
+    except Exception as e:
+        print(f"[Map] geocode 失败({name}): {e}")
+    return None
+
 
 class _ExitAPIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -2578,12 +2601,27 @@ class VoiceAssistant:
                 city = re.sub(r"(的|最新|热点|资讯|新闻|地图)$", "", m.group(1))
                 if city:
                     print(f"[Map] 定位到: {city}")
+                    # 先用本地城市表快速定位，后台天地图地理编码解析出精确坐标后覆盖
                     self.visual.send(f"map_locate {city}")
                     threading.Thread(
                         target=self._fetch_city_news_async, args=(city,), daemon=True
                     ).start()
+                    threading.Thread(
+                        target=self._geocode_and_locate, args=(city,), daemon=True
+                    ).start()
                     return True
         return False
+
+    def _geocode_and_locate(self, city: str):
+        """后台：天地图解析精确经纬度 → map_locate lat,lon,name 覆盖定位。"""
+        try:
+            ll = _geocode_city(city)
+            if ll:
+                lat, lon = ll
+                self.visual.send(f"map_locate {lat:.6f},{lon:.6f},{city}")
+                print(f"[Map] 精确定位 {city}: {lat:.6f},{lon:.6f}")
+        except Exception as e:
+            print(f"[Map] geocode-and-locate 异常: {e}")
 
     def _fetch_city_news_async(self, city: str):
         """后台抓取城市热点并推送给 overlay 展示。"""

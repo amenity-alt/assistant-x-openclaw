@@ -546,6 +546,7 @@ class _TileMapPainter extends CustomPainter {
   final double time; // 0..1 循环时间源（定位标记脉冲）
   final Map<String, ui.Image> tiles; // key: layer/z/x/y
   final int tilesVersion;
+  final String cityName;
 
   _TileMapPainter({
     required this.lat0,
@@ -554,10 +555,12 @@ class _TileMapPainter extends CustomPainter {
     required this.time,
     required this.tiles,
     required this.tilesVersion,
+    required this.cityName,
   });
 
   static const _cyan = Color(0xFF35D0FF);
-  static const _hotColor = Color(0xFFFFB347);
+  // 定位红点
+  static const _red = Color(0xFFFF3B30);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -603,26 +606,54 @@ class _TileMapPainter extends CustomPainter {
         }
       }
 
-      // 定位城市标记：橙色脉冲环 + 光点（居中）
+      // 定位标记：红色脉冲点 + 红色定位环（居中）
       final pulse = 0.5 + 0.5 * math.sin(time * 2 * math.pi * 2);
-      _glowDot(canvas, c, 5.0 + pulse * 3.0, _hotColor, 1.0);
       canvas.drawCircle(
         c,
-        7.0 + pulse * 5.0,
+        3.6,
+        Paint()..color = _red.withValues(alpha: 0.95),
+      );
+      _glowDot(canvas, c, 7.0 + pulse * 3.0, _red, 0.8);
+      canvas.drawCircle(
+        c,
+        9.0 + pulse * 5.0,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.4
-          ..color = _hotColor.withValues(alpha: 0.85)
+          ..strokeWidth = 1.6
+          ..color = _red.withValues(alpha: 0.9)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
       );
       canvas.drawCircle(
         c,
-        14.0 + pulse * 6.0,
+        16.0 + pulse * 7.0,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.8
-          ..color = _hotColor.withValues(alpha: 0.4),
+          ..strokeWidth = 0.9
+          ..color = _red.withValues(alpha: 0.45),
       );
+      // 城市名标签（红点上方）
+      if (cityName.isNotEmpty) {
+        final tp = TextPainter(
+          text: TextSpan(
+            text: cityName,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+              shadows: [
+                Shadow(
+                  color: Color(0xFF000000),
+                  blurRadius: 4,
+                  offset: Offset(0, 1),
+                ),
+              ],
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, Offset(c.dx - tp.width / 2, c.dy - 22 - tp.height));
+      }
 
       // 外框扫描环
       canvas.drawCircle(
@@ -724,7 +755,8 @@ class _TileMapPainter extends CustomPainter {
       old.zoom != zoom ||
       old.time != time ||
       old.tilesVersion != tilesVersion ||
-      old.tiles != tiles;
+      old.tiles != tiles ||
+      old.cityName != cityName;
 }
 
 class MapGlobeCard extends StatefulWidget {
@@ -970,6 +1002,7 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                                       time: _anim.value,
                                       tiles: _tiles,
                                       tilesVersion: _tilesVersion,
+                                      cityName: _controller.locatedCity ?? '',
                                     ),
                                     size: Size.infinite,
                                   );
