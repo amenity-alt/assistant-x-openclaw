@@ -7,12 +7,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import 'hud_terminal_shell.dart';
+import 'world_land_data.dart';
 
 /// 地图态势卡片（左上角悬浮）
 ///
 /// Flutter 原生绘制的 JARVIS 全球态势图（正射投影，亚洲为中心）：
-/// 深蓝玻璃底 + 经纬网格 + 全球节点（hub/node/hot）+ 数据弧线流动 +
-/// 扫描环 + 轨道粒子 + 热点脉冲。
+/// 自转地球（约 40 秒/圈）+ 发光大陆轮廓（Natural Earth 简化数据）+
+/// 经纬网格 + 全球节点（hub/node/hot）+ 数据弧线流动 + 扫描环 +
+/// 轨道粒子 + 热点脉冲。
 ///
 /// 扩展能力（本版本新增）：
 ///  - 缩放：voice 指令 `map_zoom +|-|reset`（overlay 点击穿透，交互走语音）
@@ -242,6 +244,31 @@ class _OrthoProjector {
   }
 }
 
+/// 世界大陆轮廓（从 kWorldLandData 扁平数组解包为环）。
+/// 数据格式：[环0点数, lon,lat,lon,lat,..., 环1点数, ...]（经度已连续化）。
+class _WorldLand {
+  static List<List<double>>? _rings;
+
+  static List<List<double>> rings() {
+    if (_rings != null) return _rings!;
+    final data = kWorldLandData;
+    final result = <List<double>>[];
+    var i = 0;
+    while (i < data.length) {
+      final n = data[i].round();
+      i++;
+      final ring = <double>[];
+      for (var j = 0; j < n * 2 && i < data.length; j++) {
+        ring.add(data[i]);
+        i++;
+      }
+      if (ring.length >= 6) result.add(ring);
+    }
+    _rings = result;
+    return result;
+  }
+}
+
 class _GlobePainter extends CustomPainter {
   final double time; // 0..1 循环时间源
   final double zoom; // 1.0~3.0
@@ -267,9 +294,13 @@ class _GlobePainter extends CustomPainter {
     try {
       final c = size.center(Offset.zero);
       final R = math.min(size.width, size.height) * 0.42 * zoom;
-      final proj = _OrthoProjector(radius: R, center: c, lat0: lat0, lon0: lon0);
+      // 自转：10 秒动画循环 × 90° → 约 40 秒/圈，特征从左向右移动（顺地球自转）
+      final rotation = -time * 90.0;
+      final proj =
+          _OrthoProjector(radius: R, center: c, lat0: lat0, lon0: lon0 + rotation);
 
       _paintEarth(canvas, c, R);
+      _paintLand(canvas, proj);
       _paintGrid(canvas, proj, zoom);
       _paintArcs(canvas, proj, time);
       _paintNodes(canvas, proj, time);
@@ -318,6 +349,52 @@ class _GlobePainter extends CustomPainter {
         ..strokeWidth = 1
         ..color = _cyanDim.withValues(alpha: 0.35),
     );
+  }
+
+  void _paintLand(Canvas canvas, _OrthoProjector proj) {
+    const landFill = Color(0xFF2B9AE6);
+    const coast = Color(0xFF8FE8FF);
+    for (final ring in _WorldLand.rings()) {
+      final path = Path();
+      bool started = false;
+      for (var i = 0; i < ring.length; i += 2) {
+        final lon = ring[i];
+        final lat = ring[i + 1];
+        final p = proj.project(lat, lon);
+        if (p != null) {
+          started ? path.lineTo(p.dx, p.dy) : path.moveTo(p.dx, p.dy);
+          started = true;
+        } else {
+          started = false;
+        }
+      }
+      if (!started) continue;
+
+      // 大陆本体：半透明亮蓝（随球面明暗自然呈现）
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.fill
+          ..color = landFill.withValues(alpha: 0.32),
+      );
+      // 大陆微光：模糊一笔让轮廓带辉光
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3.2
+          ..color = coast.withValues(alpha: 0.22)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.5),
+      );
+      // 海岸线：亮色细线
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0
+          ..color = coast.withValues(alpha: 0.85),
+      );
+    }
   }
 
   void _paintGrid(Canvas canvas, _OrthoProjector proj, double zoom) {
