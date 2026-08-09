@@ -615,7 +615,7 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Expanded(
-                      flex: 56,
+                      flex: 54,
                       // 硬裁剪：地球绘制（辉光/扫描环/粒子/放大）严格限制在
                       // 地图区域内，绝不溢出到资讯栏或卡片外。
                       child: ClipRect(
@@ -637,29 +637,19 @@ class _MapGlobeCardState extends State<MapGlobeCard>
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 10),
+                    // 资讯面板与球体并行（同高右侧栏），比之前更大
                     Expanded(
-                      flex: 44,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Expanded(
-                            flex: 2,
-                            child: _MemoryLog(),
-                          ),
-                          const SizedBox(height: 6),
-                          Expanded(
-                            flex: 3,
-                            child: _NewsPanel(
-                              controller: _controller,
-                            ),
-                          ),
-                        ],
+                      flex: 46,
+                      child: _NewsPanel(
+                        controller: _controller,
                       ),
                     ),
                   ],
                 ),
               ),
+              const SizedBox(height: 6),
+              const _MemoryLogStrip(),
               const SizedBox(height: 6),
               _StatsRow(flow: _flow, agents: _agents, risk: _risk, zoom: zoom),
               const SizedBox(height: 6),
@@ -672,8 +662,10 @@ class _MapGlobeCardState extends State<MapGlobeCard>
   }
 }
 
-/// Memory Log（记忆中心）— 彩色状态点 + 状态图标 + 时间
-class _MemoryLog extends StatelessWidget {
+/// Memory Log（记忆中心）— 卡片底部紧凑横条（2×2 状态点 + 记录 + 时间）
+class _MemoryLogStrip extends StatelessWidget {
+  const _MemoryLogStrip();
+
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
@@ -683,113 +675,91 @@ class _MemoryLog extends StatelessWidget {
       return '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
     }
 
+    const entries = [
+      ('User Analysis Completed', Color(0xFF3DFF8A), 12, true),
+      ('Knowledge Graph Updated', Color(0xFF3DFF8A), 48, true),
+      ('SQL Optimization Finished', Color(0xFF35D0FF), 126, true),
+      ('Agent Task Running', Color(0xFFFFB347), 2, false),
+    ];
+
+    Widget cell(int idx) {
+      final (label, color, secs, done) = entries[idx];
+      return Row(
+        children: [
+          Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color,
+              boxShadow: [
+                BoxShadow(color: color.withValues(alpha: 0.7), blurRadius: 3),
+              ],
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: const Color(0xFFB7D8F5).withValues(alpha: 0.95),
+                fontSize: 7.5,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            done ? '✓' : '◐',
+            style: TextStyle(
+              color: color,
+              fontSize: 8,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 3),
+          Text(
+            hm(secs),
+            style: TextStyle(
+              color: const Color(0xFF5F87B8),
+              fontSize: 7,
+            ),
+          ),
+        ],
+      );
+    }
+
     return Container(
       decoration: BoxDecoration(
         color: const Color(0x140D67BC),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF35D0FF).withValues(alpha: 0.22)),
+        border: Border.all(
+            color: const Color(0xFF35D0FF).withValues(alpha: 0.22)),
       ),
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _MiniHeader('MEMORY LOG'),
-          const SizedBox(height: 4),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _LogRow(
-                  label: 'User Analysis Completed',
-                  color: const Color(0xFF3DFF8A),
-                  time: hm(12),
-                  done: true,
-                ),
-                _LogRow(
-                  label: 'Knowledge Graph Updated',
-                  color: const Color(0xFF3DFF8A),
-                  time: hm(48),
-                  done: true,
-                ),
-                _LogRow(
-                  label: 'SQL Optimization Finished',
-                  color: const Color(0xFF35D0FF),
-                  time: hm(126),
-                  done: true,
-                ),
-                _LogRow(
-                  label: 'Agent Task Running',
-                  color: const Color(0xFFFFB347),
-                  time: hm(2),
-                  done: false,
-                ),
-              ],
-            ),
+          Row(
+            children: [
+              const _MiniHeader('MEMORY LOG'),
+              const SizedBox(width: 10),
+              Expanded(child: cell(0)),
+              const SizedBox(width: 10),
+              Expanded(child: cell(1)),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Row(
+            children: [
+              Expanded(child: cell(2)),
+              const SizedBox(width: 10),
+              Expanded(child: cell(3)),
+            ],
           ),
         ],
       ),
-    );
-  }
-}
-
-class _LogRow extends StatelessWidget {
-  final String label;
-  final Color color;
-  final String time;
-  final bool done;
-  const _LogRow({
-    required this.label,
-    required this.color,
-    required this.time,
-    required this.done,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Container(
-          width: 6,
-          height: 6,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: color,
-            boxShadow: [
-              BoxShadow(color: color.withValues(alpha: 0.7), blurRadius: 4),
-            ],
-          ),
-        ),
-        const SizedBox(width: 5),
-        Expanded(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: const Color(0xFFB7D8F5).withValues(alpha: 0.95),
-              fontSize: 8,
-              letterSpacing: 0.2,
-            ),
-          ),
-        ),
-        const SizedBox(width: 4),
-        Text(
-          done ? '✓' : '◐',
-          style: TextStyle(
-            color: color,
-            fontSize: 9,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(width: 4),
-        Text(
-          time,
-          style: TextStyle(
-            color: const Color(0xFF5F87B8),
-            fontSize: 7.5,
-          ),
-        ),
-      ],
     );
   }
 }
@@ -810,12 +780,12 @@ class _NewsPanel extends StatelessWidget {
         border: Border.all(
             color: const Color(0xFFFFB347).withValues(alpha: 0.35)),
       ),
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.all(10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _MiniHeader(city == null ? 'HOT SIGNAL' : '📍 $city 热点'),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           Expanded(
             child: items.isEmpty
                 ? Center(
@@ -823,7 +793,7 @@ class _NewsPanel extends StatelessWidget {
                       city == null ? '未定位 · 说"定位到城市"' : '获取最新资讯中...',
                       style: TextStyle(
                         color: const Color(0xFF5F87B8).withValues(alpha: 0.9),
-                        fontSize: 8,
+                        fontSize: 9,
                       ),
                     ),
                   )
@@ -833,7 +803,7 @@ class _NewsPanel extends StatelessWidget {
                     itemBuilder: (context, i) {
                       final it = items[i];
                       return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
+                        padding: const EdgeInsets.only(bottom: 6),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -841,23 +811,23 @@ class _NewsPanel extends StatelessWidget {
                               '${i + 1}',
                               style: TextStyle(
                                 color: const Color(0xFFFFB347),
-                                fontSize: 8,
+                                fontSize: 9,
                                 fontWeight: FontWeight.w700,
                               ),
                             ),
-                            const SizedBox(width: 4),
+                            const SizedBox(width: 5),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
                                     it.title,
-                                    maxLines: 2,
+                                    maxLines: 3,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                       color: Color(0xFFDCEEFF),
-                                      fontSize: 9,
-                                      height: 1.25,
+                                      fontSize: 10,
+                                      height: 1.3,
                                     ),
                                   ),
                                   if (it.source.isNotEmpty || it.time.isNotEmpty)
@@ -867,7 +837,7 @@ class _NewsPanel extends StatelessWidget {
                                           .join(' · '),
                                       style: TextStyle(
                                         color: const Color(0xFF5F87B8),
-                                        fontSize: 7,
+                                        fontSize: 8,
                                       ),
                                     ),
                                 ],
