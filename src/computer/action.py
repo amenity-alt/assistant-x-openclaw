@@ -30,6 +30,9 @@ _ACTION_RISK = {
     "double_click_element": Risk.AUTO,
     "mouse_move": Risk.AUTO,
     "scroll": Risk.AUTO,
+    "take_screenshot": Risk.AUTO,
+    "get_screen_state": Risk.AUTO,
+    "list_apps": Risk.AUTO,
 }
 
 

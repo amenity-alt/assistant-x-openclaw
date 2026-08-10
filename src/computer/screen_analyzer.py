@@ -125,3 +125,51 @@ def find_element(app: str, text: str, role: str = "button") -> dict:
             if v and (t in v or v in t):
                 return el
     return None
+
+
+def describe_screen(app: str = None, max_items: int = 12) -> dict:
+    """描述前台屏幕：窗口标题 + 可交互元素摘要（语义定位的结果喂给大脑/语音）。
+
+    返回 {app, window, buttons[], fields[], summary, count}。
+    """
+    app = app or frontmost_app()
+    els = list_elements(app)
+    window = ""
+    for e in els:
+        if e["role"].lower() == "axwindow" and e["title"]:
+            window = e["title"]
+            break
+    buttons = []
+    fields = []
+    others = []
+    for e in els:
+        r = e["role"].lower()
+        label = e["title"] or e["desc"] or e["value"]
+        if not label or label == "missing value":
+            continue
+        item = {"label": label, "role": e["role"], "center": e["center"]}
+        if "button" in r:
+            buttons.append(item)
+        elif "textfield" in r or "text area" in r or "searchfield" in r:
+            fields.append(item)
+        elif "checkbox" in r or "menu" in r or "popup" in r:
+            others.append(item)
+    bnames = [b["label"] for b in buttons[:max_items]]
+    fnames = [f["label"] for f in fields[:max_items]]
+    parts = []
+    if window:
+        parts.append(f"窗口「{window}」")
+    if bnames:
+        parts.append("可点击按钮: " + "、".join(bnames))
+    if fnames:
+        parts.append("输入框: " + "、".join(fnames))
+    if not parts:
+        parts.append("未找到可交互元素（该应用可能不暴露界面信息）")
+    return {
+        "app": app,
+        "window": window,
+        "buttons": buttons,
+        "fields": fields,
+        "summary": "。".join(parts),
+        "count": len(els),
+    }

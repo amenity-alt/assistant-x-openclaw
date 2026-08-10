@@ -33,6 +33,17 @@ _TYPE_RE = re.compile(r"^(?:输入一下|帮我输入|输入|打字|type|input)\
 _PRESS_RE = re.compile(r"^(?:按一下|按下|按组合键|快捷键|press|hit|按)\s*(.+)$", re.I)
 _CLICK_RE = re.compile(r"^(?:点击|点一下|单击|点选|click on|click)\s*(.+)$", re.I)
 _DCLICK_RE = re.compile(r"^(?:双击|double click)\s*(.+)$", re.I)
+_SCREENSHOT_RE = re.compile(r"^(?:截屏|截图|拍屏|屏幕截图|take a screenshot|screenshot)\s*$", re.I)
+_LOOK_SCREEN_RE = re.compile(
+    r"^(?:查看屏幕|看屏幕|看看屏幕|屏幕上有什么|屏幕上有啥|查看界面|看下屏幕|"
+    r"describe screen|describe the screen|what.*on screen)\s*$",
+    re.I,
+)
+_LIST_APPS_RE = re.compile(
+    r"^(?:现在开着什么|打开的应用|开着什么|哪些应用在运行|正在运行的应用|"
+    r"list apps|running apps)\s*$",
+    re.I,
+)
 
 
 def _clean_target(raw: str) -> str:
@@ -47,6 +58,15 @@ def parse(text: str) -> Action:
     t = _PREFIX_NOISE.sub("", text or "").strip()
     if not t:
         return None
+
+    if _SCREENSHOT_RE.match(t):
+        return Action(action="take_screenshot")
+
+    if _LOOK_SCREEN_RE.match(t):
+        return Action(action="get_screen_state")
+
+    if _LIST_APPS_RE.match(t):
+        return Action(action="list_apps")
 
     m = _OPEN_RE.match(t) or _LAUNCH_RE.match(t)
     if m:

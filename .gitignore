@@ -144,3 +144,6 @@ assistant_overlay/assets/ironman/*.png
 
 # node_modules
 node_modules/
+
+# Computer agent screenshots
+logs/screenshots/

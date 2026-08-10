@@ -13,7 +13,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .action import Action, Risk
 from .action_log import ActionLog
-from . import application_controller, keyboard_controller, mouse_controller, screen_analyzer
+from . import (
+    application_controller,
+    keyboard_controller,
+    mouse_controller,
+    screen_analyzer,
+    screen_capture,
+    screen_ocr,
+)
 
 _EXEC_TIMEOUT = 20.0  # 单个 Action 执行上限（秒）
 
@@ -43,7 +50,13 @@ class CommandExecutor:
         result.setdefault("message", "")
         elapsed = round(time.time() - started, 2)
         result["elapsed"] = elapsed
-        self._finish(action, ok=result["ok"], detail=result["message"], elapsed=elapsed)
+        self._finish(
+            action,
+            ok=result["ok"],
+            detail=result["message"],
+            elapsed=elapsed,
+            extra=result,
+        )
         return result
 
     # ── 派发表（Phase 2：应用控制 + 键盘 + 语义点击；后续按 action 扩充） ──
@@ -70,7 +83,49 @@ class CommandExecutor:
             return mouse_controller.move(x, y)
         if a == "scroll":
             return mouse_controller.scroll(action.params.get("amount", -3))
+        if a == "take_screenshot":
+            path = screen_capture.capture()
+            if not path:
+                return {
+                    "ok": False,
+                    "message": "截图失败：请检查终端是否已授予屏幕录制权限",
+                }
+            return {"ok": True, "message": f"已截图: {path}", "path": path}
+        if a == "get_screen_state":
+            return self._screen_state()
+        if a == "list_apps":
+            apps = application_controller.list_running_apps()
+            if not apps:
+                return {"ok": False, "message": "无法获取运行中的应用列表"}
+            return {
+                "ok": True,
+                "message": "正在运行: " + "、".join(apps),
+                "apps": apps,
+            }
         return {"ok": False, "message": f"未知操作: {a}"}
+
+    def _screen_state(self) -> dict:
+        """查看屏幕：截图 + AX 描述 + OCR 文字层。"""
+        app = screen_analyzer.frontmost_app()
+        desc = screen_analyzer.describe_screen(app)
+        path = screen_capture.capture()
+        ocr_texts = []
+        if path:
+            ocr_texts = screen_ocr.recognize(path)
+        texts = [t["text"] for t in ocr_texts[:10]]
+        msg = f"前台应用 {desc['app']}。{desc['summary']}"
+        if texts:
+            msg += "。屏幕可见文字: " + "；".join(texts[:8])
+        result = {
+            "ok": True,
+            "message": msg,
+            "app": desc["app"],
+            "window": desc["window"],
+            "screenshot": path,
+            "elements_count": desc["count"],
+            "texts": texts,
+        }
+        return result
 
     def _click_element(self, text: str, double: bool = False) -> dict:
         """语义点击：前台 App AX 树里找「text」元素 → 中心坐标 → 鼠标点击。"""
@@ -91,7 +146,14 @@ class CommandExecutor:
         return result
 
     # ── 日志与结果 ──────────────────────────────────────
-    def _finish(self, action: Action, ok: bool, detail: str = "", elapsed: float = 0.0):
+    def _finish(
+        self,
+        action: Action,
+        ok: bool,
+        detail: str = "",
+        elapsed: float = 0.0,
+        extra: dict = None,
+    ):
         entry = {
             "agent": "computer",
             "action": action.action,
@@ -103,6 +165,9 @@ class CommandExecutor:
             "elapsed": elapsed,
             "action_id": action.id,
         }
+        if extra:
+            for k, v in extra.items():
+                entry.setdefault(k, v)
         with self._lock:
             self._last_result = entry
         self._log.record(entry)
