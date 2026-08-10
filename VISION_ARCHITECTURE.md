@@ -110,7 +110,7 @@ scripts/start.sh（唯一监督者，禁止改动）
 现状：**无 MediaPipe / OpenCV / torch**；Python 仅有 onnxruntime 1.28.0。
 
 - **Phase 1（本次实现，推荐）**：只做**渲染层 + 数据接口预留**。Flutter 端完整实现 21 关键点 + 骨骼连接线 + Glow / 粒子 / 轨迹 / 扫描波纹渲染（CustomPainter）；数据源抽象为 `VisionHandTracker` 接口，Python 端 Phase 1 不推真实数据（HUD 显示 `HAND TRACKING STANDBY`），后续接入零改动。
-- **Phase 2（可选，需用户批准）**：`pip install mediapipe`（约 100~150MB）→ `src/vision_hands_mediapipe.py` 实现同接口，`VisionManager` 每帧跑 `mediapipe.solutions.hands` → `vision:hand` 推送。未来 OCR / 物检 / 脸检 / 手势控制（握拳→Pause、捏合→Select、指向→Execute）都走同一接口扩展。
+- **Phase 2（已完成，用户已批准）**：`mediapipe==0.10.35`（官方 Tasks API `HandLandmarker`）→ `src/vision_hands_mediapipe.py` 实现同接口，`VisionManager` 每帧检测 → `vision:hand` 推送（检测到手 → `HAND_DETECTED`，消失回 `SCANNING`）。模型 `models/hand_landmarker.task` 缺失时自动限时下载。未来 OCR / 物检 / 脸检 / 手势控制（握拳→Pause、捏合→Select、指向→Execute）都走同一接口扩展。
 - 建议在架构确认时一并决定：**是否接受 Phase 1 无真实手部数据（演示 HUD 完成）**，还是**批准引入 MediaPipe 直接上真实跟踪**。
 
 ---

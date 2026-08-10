@@ -78,7 +78,6 @@ class VisionManager:
         self._thread = None
         self._proc = None
         self._visual = None
-        self._tracker = _NullVisionHandTracker()
         self._fps_interval = 1.0 / _FRAME_FPS
 
     # ── 绑定当前角色 visual ──────────────────────────────
@@ -181,6 +180,15 @@ class VisionManager:
         except Exception:
             pass
 
+    def _make_tracker(self):
+        """创建手部跟踪器：MediaPipe 优先；不可用/加载失败回退空实现（软失败）。"""
+        try:
+            from vision_hands_mediapipe import MediaPipeHandTracker
+            return MediaPipeHandTracker()
+        except Exception as e:
+            print(f"[Vision] MediaPipe 手部跟踪不可用: {e}")
+            return _NullVisionHandTracker()
+
     def _run(self):
         """帧采集线程：起 ffmpeg MJPEG 流 → 切帧 → 推 vision:* 事件。"""
         proc = None
@@ -196,10 +204,10 @@ class VisionManager:
                 self._proc = proc
             self._send(f"vision:status {STATE_SCANNING}")
             print("[Vision] 视觉模式已激活（摄像头帧流在线）")
-            tracker = self._tracker
+            tracker = self._make_tracker()
             try:
                 tracker.start(640, 360)
-                self._pump_frames(proc)
+                self._pump_frames(proc, tracker)
             finally:
                 tracker.stop()
         finally:
@@ -212,10 +220,11 @@ class VisionManager:
                     self._active = False
             print("[Vision] 视觉模式已退出")
 
-    def _pump_frames(self, proc):
+    def _pump_frames(self, proc, tracker=None):
         buf = b""
         last_send = 0.0
         first = True
+        had_hand = False
         while not self._stop_event.is_set():
             try:
                 chunk = proc.stdout.read(_MJPEG_READ_CHUNK)
@@ -250,10 +259,18 @@ class VisionManager:
                 if now - last_send >= self._fps_interval:
                     last_send = now
                     self._send_frame(jpeg)
-                hand = self._tracker.process(jpeg)
+                hand = None
+                if tracker is not None:
+                    hand = tracker.process(jpeg)
                 if hand:
+                    if not had_hand:
+                        self._send(f"vision:status {STATE_HAND_DETECTED}")
+                        had_hand = True
                     payload = json.dumps(hand, ensure_ascii=False)
                     self._send(f"vision:hand {payload}", quiet=True)
+                elif had_hand:
+                    self._send(f"vision:status {STATE_SCANNING}")
+                    had_hand = False
 
     def _send_frame(self, jpeg: bytes):
         b64 = base64.b64encode(jpeg).decode("ascii")

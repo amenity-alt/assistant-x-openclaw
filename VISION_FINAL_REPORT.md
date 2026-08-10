@@ -16,6 +16,8 @@
 - `src/assistants/jarvis/visual.py`、`src/assistants/custom_visual.py`：`send(message, quiet=False)` 支持帧推送不打日志。
 - `assistant_overlay/lib/jarvis_overlay.dart`：`vision:*` 命令分发、全屏 HUD 顶层挂载、Vision 激活时隐藏地图卡片与 SYSTEM STATUS、dispose 释放。
 - `assistant_overlay/lib/agent_overlay.dart`、`lib/tcp_server.dart`：大帧日志截断（防刷屏）。
+- `src/vision_hands_mediapipe.py`（新增）：MediaPipe HandLandmarker 手部跟踪（Phase 2）。
+- `requirements.txt`：新增 `mediapipe==0.10.35`（用户已批准）。
 
 ## 4. Vision 工作流程
 ```
@@ -37,9 +39,11 @@
 - 软失败：ffmpeg 缺失/摄像头不可用/未授权 → `vision:status ERROR` → 退出，不影响语音主流程。
 - 关闭时 terminate+wait+timeout kill；start/stop/start 竞态用 ident 守卫 + 局部 proc 清理。
 
-## 7. Hand Tracking 方案
-- Phase 1：渲染层 + 接口预留。`VisionHandTracker` 抽象（`start/process/stop`），当前为空实现；HUD 显示 `HAND TRACKING STANDBY`。
-- Flutter 已实现 21 关键点 + MediaPipe 标准骨骼拓扑 + glow + 掌心波纹渲染，`vision:hand` 协议已定义，Phase 2 接入 MediaPipe 只需实现 `process()` 返回同结构 payload。
+## 7. Hand Tracking 方案（Phase 2 已完成）
+- `VisionHandTracker` 抽象（`start/process/stop`）+ MediaPipe 实现：`src/vision_hands_mediapipe.py`（官方 Tasks API `HandLandmarker`，CPU XNNPACK）。
+- 模型：`models/hand_landmarker.task`（约 7.6MB，本地已下载；缺失时首次使用自动从官方地址限时下载，失败软退化为 STANDBY）。
+- 检测输出 21 关键点 + 左右手标签 + 置信度，经 `vision:hand <json>` 推送；检测到手 → `vision:status HAND_DETECTED`，手消失 → 回 `SCANNING`。
+- 实测：示例双手图 2 手各 21 点，约 20ms/帧（10fps 余量充足）。
 
 ## 8. HUD 方案
 - 全屏暗色 HUD：摄像头背景（压暗 + 青色染色 + 暗角）→ 透视扫描网格 + 扫描线 → 中央圆形聚焦环（刻度环/旋转弧/十字线/角标框）→ 手部层 → 左 SYSTEM STATUS / 右 VISION DATA 玻璃面板 → 顶栏 JARVIS VISION SYSTEM → 状态大字 → 底部 AI PROCESSING 进度条。
@@ -54,11 +58,14 @@
 
 ## 11. 性能处理
 - 帧 640×360@10fps、JPEG q6、覆盖式只留最新帧（Flutter 解码中丢帧）；帧推送 quiet 模式不打日志、TCP/overlay 日志截断。
+- 手部跟踪 20ms/帧（CPU XNNPACK），MediaPipe 框架一次性 I/W 日志用 fd2 重定向静默；`stop()` 关闭 landmarker。
 - Vision OFF 时零推送；RepaintBoundary 隔离全屏层；退出/角色切换时释放 ffmpeg、帧线程、ui.Image、AnimationController、Listener。
 - 摄像头与 `/camera/snapshot` 通过单例锁语义串行（Vision 独占期间 snapshot 软失败）。
 
 ## 12. 测试结果
-- `python -m py_compile`：src/main.py、src/vision.py、两个 visual.py 全部通过。
+- `python -m py_compile`：src/main.py、src/vision.py、src/vision_hands_mediapipe.py、两个 visual.py 全部通过。
+- 手部跟踪实测：官方示例双手图 → 2 手 × 21 关键点（Left 0.94 / Right 0.96），约 20ms/帧。
+- 帧流端到端（testsrc 伪摄像头）：`vision:start → INITIALIZING → SCANNING` + 26 帧 base64 + `vision:stop`，退出后 inactive。
 - `flutter analyze`：无 error；64 项均为项目原有告警（avoid_print / 旧 lib/overlay 树 / 既有未用字段）；新文件 `vision_overlay.dart` 0 告警。
 - Vision 指令逻辑测试（不触摄像头）：开启/关闭/重复去重/非视觉文本放行/中英文口播跟随，全部通过。
 - 未改动 `scripts/start.sh`、launchd、杀进程保护、Hermes/OpenClaw 桥、TTS 引擎、地图核心逻辑（git diff 核对）。
