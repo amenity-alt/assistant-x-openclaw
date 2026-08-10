@@ -305,8 +305,18 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
             child: Stack(
               fit: StackFit.expand,
               children: [
-                // 0. 全息核心：常驻挂载（跨会话复用 three_js 渲染器，
-                //    规避上游 dispose/create 泄漏；隐藏时停帧不渲染）
+                // 1. 摄像头背景 + 暗色 HUD 底 + 扫描网格（会话内绘制）
+                if (c.showHud) ...[
+                CustomPaint(painter: _VisionBackdropPainter(frame: c.frame)),
+                AnimatedBuilder(
+                  animation: _scanline,
+                  builder: (context, child) => CustomPaint(
+                    painter: _ScanGridPainter(progress: _scanline.value),
+                  ),
+                ),
+                ],
+                // 2. 全息核心：常驻挂载（在背景之上、聚焦环之下；
+                //    跨会话复用 three_js 渲染器，隐藏时停帧不渲染）
                 if (kUseThreeJsRenderer)
                   IgnorePointer(
                     ignoring: !c.showHud,
@@ -324,17 +334,8 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                       ),
                     ),
                   ),
-                // 1. 摄像头背景 + 暗色 HUD 底
-                if (c.showHud) ...[
-                CustomPaint(painter: _VisionBackdropPainter(frame: c.frame)),
-                // 2. 扫描网格 + 扫描线
-                AnimatedBuilder(
-                  animation: _scanline,
-                  builder: (context, child) => CustomPaint(
-                    painter: _ScanGridPainter(progress: _scanline.value),
-                  ),
-                ),
                 // 3. 中央聚焦环
+                if (c.showHud) ...[
                 Center(
                   child: AnimatedBuilder(
                     animation: Listenable.merge([_sweep, _fade]),
