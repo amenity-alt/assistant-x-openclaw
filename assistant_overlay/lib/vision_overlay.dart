@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import 'hud_terminal_shell.dart';
+import 'vision_gesture/hologram/three_js_hologram_view.dart';
 
 /// Jarvis Vision Mode 全屏 HUD（Capability，非 Agent）
 ///
@@ -279,6 +280,14 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                   animation: _scanline,
                   builder: (context, child) => CustomPaint(
                     painter: _ScanGridPainter(progress: _scanline.value),
+                  ),
+                ),
+                // 2.5 全息核心（three_js 3D，Phase 1 技术验证）
+                Center(
+                  child: SizedBox(
+                    width: ringSize * 0.8,
+                    height: ringSize * 0.8,
+                    child: const ThreeJsHologramView(),
                   ),
                 ),
                 // 3. 中央聚焦环
