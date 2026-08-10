@@ -2693,33 +2693,54 @@ class VoiceAssistant:
 
     def _vision_like(self, t: str) -> bool:
         """流式识别阶段的轻量视觉指令预判（避免回声把文字刷进输入框）。"""
-        return "视觉" in t and any(
-            k in t for k in ("扫描", "模式", "开启", "关闭", "退出", "启动", "打开", "停止", "进入")
+        return bool(
+            re.search(
+                r"(?:开启|启动|打开|进入|开始|关闭|退出|停止|结束)\s*"
+                r"(?:视觉扫描|视觉模式|视觉|扫描|模式)",
+                t,
+            )
         )
 
     def _handle_vision_command(self, text: str) -> bool:
         """识别视觉模式指令（开启/关闭视觉扫描）：返回 True 表示已消费，不进大模型。"""
         t = (text or "").strip()
-        if not t or "视觉" not in t:
+        if not t:
             return False
-        start = bool(re.search(r"(?:开启|启动|打开|进入)\s*(?:视觉扫描|视觉模式|视觉)", t))
-        stop = bool(re.search(r"(?:关闭|退出|停止)\s*(?:视觉扫描|视觉模式|视觉)", t))
+        start = bool(
+            re.search(
+                r"(?:开启|启动|打开|进入|开始)\s*(?:视觉扫描|视觉模式|视觉|扫描|模式)",
+                t,
+            )
+        )
+        stop = bool(
+            re.search(
+                r"(?:关闭|退出|停止|结束)\s*(?:视觉扫描|视觉模式|视觉|扫描|模式)",
+                t,
+            )
+        )
+        try:
+            from vision import get_vision_manager
+            mgr = get_vision_manager()
+        except Exception as e:
+            print(f"[Vision] 模块加载失败: {e}")
+            return False
         if not start and not stop:
-            return False
+            # 视觉模式激活时，裸"关闭/退出/停止"视为关闭视觉（"结束"是系统退出词，不抢）
+            if mgr.is_active() and t in ("关闭", "退出", "停止"):
+                stop = True
+            else:
+                return False
         norm = "start" if start else "stop"
         now = time.time()
+        _diag.info(
+            "[Vision] cmd=%r start=%s stop=%s active=%s", t, start, stop, mgr.is_active()
+        )
         # 去重：同一指令 15 秒内重复（ASR 回声/流式重发）→ 忽略但仍消费
         if norm == self._last_vision_norm and now - self._last_vision_ts < self._VISION_DEDUP_TTL:
             print(f"[Vision] 重复指令忽略: {t}")
             return True
         self._last_vision_norm = norm
         self._last_vision_ts = now
-        try:
-            from vision import get_vision_manager
-            mgr = get_vision_manager()
-        except Exception as e:
-            print(f"[Vision] 模块加载失败: {e}")
-            return True
         if start:
             if mgr.is_active():
                 print("[Vision] 已在视觉模式，忽略重复开启")

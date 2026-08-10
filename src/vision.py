@@ -38,8 +38,9 @@ STATE_COMPLETED = "COMPLETED"
 STATE_ERROR = "ERROR"
 STATE_OFF = "OFF"
 
-_FRAME_FPS = 10
-_FRAME_SIZE = "640x360"
+_FRAME_FPS = 30          # 摄像头采集帧率（avfoundation 设备协商用）
+_FRAME_SIZE = "640x480"  # 摄像头分辨率（MacBook 摄像头最小支持 640x480）
+_SEND_FPS = 10           # 推送给 overlay / 手部识别的帧率（网络与 CPU 友好）
 _MJPEG_READ_CHUNK = 65536
 _MAX_BUF = 4 * 1024 * 1024
 
@@ -78,7 +79,7 @@ class VisionManager:
         self._thread = None
         self._proc = None
         self._visual = None
-        self._fps_interval = 1.0 / _FRAME_FPS
+        self._fps_interval = 1.0 / _SEND_FPS
 
     # ── 绑定当前角色 visual ──────────────────────────────
     def bind_visual(self, visual):
@@ -145,6 +146,7 @@ class VisionManager:
         cmd = [
             exe, "-hide_banner", "-loglevel", "error",
             "-f", "avfoundation",
+            "-pixel_format", "yuyv422",
             "-framerate", str(_FRAME_FPS),
             "-video_size", _FRAME_SIZE,
             "-i", "0",
@@ -205,8 +207,9 @@ class VisionManager:
             self._send(f"vision:status {STATE_SCANNING}")
             print("[Vision] 视觉模式已激活（摄像头帧流在线）")
             tracker = self._make_tracker()
+            w, h = (int(p) for p in _FRAME_SIZE.split("x"))
             try:
-                tracker.start(640, 360)
+                tracker.start(w, h)
                 self._pump_frames(proc, tracker)
             finally:
                 tracker.stop()
@@ -259,18 +262,18 @@ class VisionManager:
                 if now - last_send >= self._fps_interval:
                     last_send = now
                     self._send_frame(jpeg)
-                hand = None
-                if tracker is not None:
-                    hand = tracker.process(jpeg)
-                if hand:
-                    if not had_hand:
-                        self._send(f"vision:status {STATE_HAND_DETECTED}")
-                        had_hand = True
-                    payload = json.dumps(hand, ensure_ascii=False)
-                    self._send(f"vision:hand {payload}", quiet=True)
-                elif had_hand:
-                    self._send(f"vision:status {STATE_SCANNING}")
-                    had_hand = False
+                    hand = None
+                    if tracker is not None:
+                        hand = tracker.process(jpeg)
+                    if hand:
+                        if not had_hand:
+                            self._send(f"vision:status {STATE_HAND_DETECTED}")
+                            had_hand = True
+                        payload = json.dumps(hand, ensure_ascii=False)
+                        self._send(f"vision:hand {payload}", quiet=True)
+                    elif had_hand:
+                        self._send(f"vision:status {STATE_SCANNING}")
+                        had_hand = False
 
     def _send_frame(self, jpeg: bytes):
         b64 = base64.b64encode(jpeg).decode("ascii")

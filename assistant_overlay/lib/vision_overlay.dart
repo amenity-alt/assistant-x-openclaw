@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -190,6 +191,7 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
   late final AnimationController _scanline;
   late final AnimationController _sweep;
   late final AnimationController _progress;
+  Timer? _exitFallback;
 
   @override
   void initState() {
@@ -221,20 +223,34 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
     if (!mounted) return;
     if (c.showHud) {
       if (c.animatingOut) {
-        if (_fade.value > 0 && !_fade.isAnimating) {
+        // 兜底：动画链路任何异常都保证 2.5s 内强制退出
+        _exitFallback ??= Timer(const Duration(milliseconds: 2500), () {
+          if (mounted && c.animatingOut) c.onExitDone();
+        });
+        if (_fade.value == 0) {
+          c.onExitDone();
+        } else if (_fade.isAnimating) {
+          // 淡入进行中收到退出 → 打断当前动画，从当前位置反向淡出
+          _fade.stop();
           _fade.reverse().whenCompleteOrCancel(() {
             if (mounted && c.animatingOut) c.onExitDone();
           });
-        } else if (_fade.value == 0) {
-          c.onExitDone();
+        } else {
+          _fade.reverse().whenCompleteOrCancel(() {
+            if (mounted && c.animatingOut) c.onExitDone();
+          });
         }
       } else {
+        _exitFallback?.cancel();
+        _exitFallback = null;
         if (_fade.value < 1.0 && !_fade.isAnimating) _fade.forward();
         if (!_scanline.isAnimating) _scanline.repeat();
         if (!_sweep.isAnimating) _sweep.repeat();
         if (!_progress.isAnimating) _progress.repeat();
       }
     } else {
+      _exitFallback?.cancel();
+      _exitFallback = null;
       _scanline.stop();
       _sweep.stop();
       _progress.stop();
@@ -519,6 +535,8 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
 
   @override
   void dispose() {
+    _exitFallback?.cancel();
+    _exitFallback = null;
     widget.controller.removeListener(_sync);
     _fade.dispose();
     _scanline.dispose();
