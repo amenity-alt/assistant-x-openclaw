@@ -1121,6 +1121,15 @@ class VoiceAssistant:
         self.tts = instance.tts
         set_tts(self.tts)
 
+        # Vision 能力跟随当前角色 visual：切换角色时若视觉模式激活则先关闭，
+        # 并把帧推送目标绑定到新角色（摄像头/帧流随角色释放，避免泄漏）
+        try:
+            from vision import get_vision_manager
+            get_vision_manager().stop_if_active()
+            get_vision_manager().bind_visual(self.visual)
+        except Exception as e:
+            print(f"[Vision] 角色切换联动失败: {e}")
+
         # 特效调试模式（assistants.json 顶层 overlay_debug_mode）：
         # 开启后，召唤出来的特效不再被隐藏/清空，方便调样式
         if hasattr(self.visual, "set_debug_mode"):
@@ -1912,9 +1921,9 @@ class VoiceAssistant:
                         self.last_voice_time = time.time()
                         if not self._suppress_recognition_until_tts_done:
                             print(f"\r✓ 识别: {result}", end="", flush=True)
-                        # 地图类指令在流式阶段不刷输入框（避免 ASR 回声把话术重复打入），
+                        # 地图/视觉类指令在流式阶段不刷输入框（避免 ASR 回声把话术重复打入），
                         # 最终判定为真指令时在下方统一显示一次。
-                        if not self._map_like(result):
+                        if not self._map_like(result) and not self._vision_like(result):
                             self.visual.show_user_text(result)
 
                     _early_recog = (
@@ -2054,6 +2063,14 @@ class VoiceAssistant:
                             if self._handle_map_command(recognition_result):
                                 if self._map_show_user_text:
                                     self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
+                            # 视觉模式指令（开启/关闭视觉扫描）→ 直接驱动 overlay，不进大模型
+                            if self._handle_vision_command(recognition_result):
+                                self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
                                 recognition_stream = self.recognizer.create_stream()
                                 start_audio_stream()
@@ -2666,6 +2683,66 @@ class VoiceAssistant:
             or self._MAP_RE_ZOOM.search(t)
             or self._MAP_RE_RESET.search(t)
         )
+
+    # ── 视觉模式（Vision Mode）指令：开启/关闭视觉扫描 ────────
+    # 本地拦截、不进大模型（与地图指令同级）；确认口播跟随角色语言
+    # （Jarvis 英文 / 林妹妹中文）。防 ASR 回声/流式重发的去重窗口。
+    _VISION_DEDUP_TTL = 15.0
+    _last_vision_norm = ""
+    _last_vision_ts = 0.0
+
+    def _vision_like(self, t: str) -> bool:
+        """流式识别阶段的轻量视觉指令预判（避免回声把文字刷进输入框）。"""
+        return "视觉" in t and any(
+            k in t for k in ("扫描", "模式", "开启", "关闭", "退出", "启动", "打开", "停止", "进入")
+        )
+
+    def _handle_vision_command(self, text: str) -> bool:
+        """识别视觉模式指令（开启/关闭视觉扫描）：返回 True 表示已消费，不进大模型。"""
+        t = (text or "").strip()
+        if not t or "视觉" not in t:
+            return False
+        start = bool(re.search(r"(?:开启|启动|打开|进入)\s*(?:视觉扫描|视觉模式|视觉)", t))
+        stop = bool(re.search(r"(?:关闭|退出|停止)\s*(?:视觉扫描|视觉模式|视觉)", t))
+        if not start and not stop:
+            return False
+        norm = "start" if start else "stop"
+        now = time.time()
+        # 去重：同一指令 15 秒内重复（ASR 回声/流式重发）→ 忽略但仍消费
+        if norm == self._last_vision_norm and now - self._last_vision_ts < self._VISION_DEDUP_TTL:
+            print(f"[Vision] 重复指令忽略: {t}")
+            return True
+        self._last_vision_norm = norm
+        self._last_vision_ts = now
+        try:
+            from vision import get_vision_manager
+            mgr = get_vision_manager()
+        except Exception as e:
+            print(f"[Vision] 模块加载失败: {e}")
+            return True
+        if start:
+            if mgr.is_active():
+                print("[Vision] 已在视觉模式，忽略重复开启")
+                return True
+            mgr.start()
+            msg = "Vision mode activated."
+            hud = "VISION MODE ACTIVE"
+            print("[Vision] 视觉模式开启指令")
+        else:
+            if not mgr.is_active():
+                print("[Vision] 当前不在视觉模式，忽略关闭")
+                return True
+            mgr.stop()
+            msg = "Vision mode deactivated."
+            hud = "VISION MODE OFF"
+            print("[Vision] 视觉模式关闭指令")
+        # 确认口播跟随角色语言（贾维斯英文 / 林妹妹中文），复用 _map_speak
+        # 的播报辅助：播放期间标记处理中、播完清空音频队列，防麦克风回声误识别
+        if self._current_lang() == "zh":
+            msg = "视觉模式已开启。" if start else "视觉模式已关闭。"
+        self.visual.show_ai_text(hud)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        return True
 
     def _map_clean_city(self, candidate: str) -> str:
         """从 ASR 提取的地点名中归一化出真实地名。

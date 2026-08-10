@@ -69,14 +69,16 @@ class JarvisVisual(AssistantVisual):
                 pass
         self.connected = False
 
-    def send(self, message: str):
+    def send(self, message: str, quiet: bool = False):
         if not self.connected or not self.socket:
-            print(f"[JARVIS_VISUAL] Not connected, cannot send: {message}")
+            if not quiet:
+                print(f"[JARVIS_VISUAL] Not connected, cannot send: {message}")
             return False
         try:
             clean_msg = message.strip()
             data = (clean_msg + "\n").encode("utf-8")
-            print(f"[JARVIS_VISUAL] Sending: {data!r} (message='{clean_msg}')")
+            if not quiet:
+                print(f"[JARVIS_VISUAL] Sending: {data!r} (message='{clean_msg}')")
             with self.lock:
                 self.socket.sendall(data)
             return True

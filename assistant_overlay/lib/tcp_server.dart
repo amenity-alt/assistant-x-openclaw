@@ -27,7 +27,14 @@ class JarvisTCPServer {
           final lines = message.split('\n');
           for (var line in lines) {
             if (line.isNotEmpty) {
-              print('[TCP] Received raw: $line');
+              // 大帧（vision:frame base64）只打印长度，避免日志刷屏
+              if (line.length > 400) {
+                print(
+                  '[TCP] Received raw (${line.length} chars): ${line.substring(0, 160)}...',
+                );
+              } else {
+                print('[TCP] Received raw: $line');
+              }
               onMessage?.call(line);
             }
           }

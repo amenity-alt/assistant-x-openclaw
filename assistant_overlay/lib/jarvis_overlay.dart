@@ -13,6 +13,7 @@ import 'package:network_info_plus/network_info_plus.dart';
 import 'agent_visual.dart';
 import 'hud_terminal_shell.dart';
 import 'map_globe_card.dart';
+import 'vision_overlay.dart';
 
 class JarvisRingsPainter extends CustomPainter {
   final double outerRingRotation;
@@ -445,6 +446,7 @@ class JarvisAgentVisual implements AgentVisual {
   bool _isSpeaking = false; // 标记用户是否正在说话
   bool _mapVisible = false; // 左上角地图态势卡片（wake 显示 / hide 隐藏）
   final MapGlobeController _mapController = MapGlobeController(); // 缩放/定位/资讯
+  final VisionHudController _visionController = VisionHudController(); // 视觉扫描模式（Capability）
 
   // 合并聊天记录：贾维斯与用户按时间顺序交替（你一句我一句）
   final List<_ChatEntry> _chatMessages = [];
@@ -526,10 +528,14 @@ class JarvisAgentVisual implements AgentVisual {
 
   @override
   void handleCommand(String command) {
-    print('Received command: $command');
-    // hide动画进行中，只响应wake命令
-    if (_isHiding && command != 'wake') {
-      print('Ignoring command during hide animation: $command');
+    // 大帧（vision:frame base64）只打印长度，避免日志刷屏
+    final dbg = command.length > 300
+        ? '${command.substring(0, 300)}... (${command.length} chars)'
+        : command;
+    print('Received command: $dbg');
+    // hide动画进行中，只响应 wake / vision 命令
+    if (_isHiding && command != 'wake' && !command.startsWith('vision:')) {
+      print('Ignoring command during hide animation: $dbg');
       return;
     }
     // 收到任何非 hide 命令，重置自动隐藏定时器
@@ -682,6 +688,16 @@ class JarvisAgentVisual implements AgentVisual {
       } catch (e) {
         print('[Map] map_news parse error: $e');
       }
+    } else if (command == 'vision:start') {
+      _visionController.onStart();
+    } else if (command == 'vision:stop') {
+      _visionController.onStop();
+    } else if (command.startsWith('vision:status ')) {
+      _visionController.setStatus(command.substring('vision:status '.length));
+    } else if (command.startsWith('vision:frame ')) {
+      _visionController.setFrame(command.substring('vision:frame '.length));
+    } else if (command.startsWith('vision:hand ')) {
+      _visionController.setHands(command.substring('vision:hand '.length));
     } else if (command.startsWith('user:')) {
       final text = command.substring(5);
       // 用户讲话，从当前值平滑变到 1.3（只触发一次）
@@ -823,6 +839,7 @@ class JarvisAgentVisual implements AgentVisual {
     _dataRingController.dispose();
     _innerRingController.dispose();
     _pulseController.dispose();
+    _visionController.dispose();
   }
 
   @override
@@ -1101,17 +1118,22 @@ class JarvisAgentVisual implements AgentVisual {
             },
           ),
         ),
-        // 左上角地图态势卡片（wake 显示 / hide 隐藏）
+        // 左上角地图态势卡片（wake 显示 / hide 隐藏；Vision 激活时让位全屏 HUD）
         if (_mapVisible)
           Positioned(
             left: 80,
             top: screenHeight * 0.05,
-            child: MapGlobeCard(
-              width: screenWidth * 0.28,
-              // 高度上限 0.40 屏高：保证卡片底部始终在 SYSTEM STATUS
-              // 面板之上，任何分辨率都不会与下方状态框重叠。
-              height: math.min(screenWidth * 0.28 * 1.30, screenHeight * 0.40),
-              controller: _mapController,
+            child: AnimatedBuilder(
+              animation: _visionController,
+              builder: (context, child) => _visionController.showHud
+                  ? const SizedBox.shrink()
+                  : MapGlobeCard(
+                      width: screenWidth * 0.28,
+                      // 高度上限 0.40 屏高：保证卡片底部始终在 SYSTEM STATUS
+                      // 面板之上，任何分辨率都不会与下方状态框重叠。
+                      height: math.min(screenWidth * 0.28 * 1.30, screenHeight * 0.40),
+                      controller: _mapController,
+                    ),
             ),
           ),
       ],
@@ -1125,58 +1147,78 @@ class JarvisAgentVisual implements AgentVisual {
     double screenHeight,
   ) {
     final double terminalHeight = screenHeight / 3;
-    return Positioned(
-      left: 80,
-      bottom: screenHeight * 0.10,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          // 显隐跟随 _ringOpacityController，与环形/序列帧等特效一致
-          AnimatedBuilder(
-            animation: _ringOpacityController,
-            builder: (context, child) => Opacity(
-              opacity: _ringOpacityController.value,
-              child: child,
-            ),
-            child: HudTerminalShell(
-              title: 'SYSTEM STATUS',
-              titleIcon: Image.asset("assets/ico-jarvis.png", width: 14, height: 14),
-              width: screenWidth / 6,
-              maxHeight: double.infinity,
-              child: const _SystemStatusPanel(),
-            ),
-          ),
-          AnimatedBuilder(
-            animation: _ringOpacityController,
-            builder: (context, child) {
-              return Opacity(
-                opacity: _ringOpacityController.value,
-                child: AnimatedBuilder(
-                  animation: _ringScaleController,
+    return Stack(
+      children: [
+        // 原 SYSTEM STATUS + 序列帧（Vision 激活时隐藏，让位全屏 HUD）
+        Positioned(
+          left: 80,
+          bottom: screenHeight * 0.10,
+          child: AnimatedBuilder(
+            animation: _visionController,
+            builder: (context, child) => _visionController.showHud
+                ? const SizedBox.shrink()
+                : child!,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // 显隐跟随 _ringOpacityController，与环形/序列帧等特效一致
+                AnimatedBuilder(
+                  animation: _ringOpacityController,
+                  builder: (context, child) => Opacity(
+                    opacity: _ringOpacityController.value,
+                    child: child,
+                  ),
+                  child: HudTerminalShell(
+                    title: 'SYSTEM STATUS',
+                    titleIcon: Image.asset("assets/ico-jarvis.png", width: 14, height: 14),
+                    width: screenWidth / 6,
+                    maxHeight: double.infinity,
+                    child: const _SystemStatusPanel(),
+                  ),
+                ),
+                AnimatedBuilder(
+                  animation: _ringOpacityController,
                   builder: (context, child) {
-                    return AnimatedBuilder(
-                      animation: _pulseController,
-                      builder: (context, child) {
-                        return SizedBox(
-                          width: terminalHeight / 3 * 2,
-                          height: terminalHeight / 3 * 2,
-                          child: JarvisSequencePlayer(
-                            assetDir: 'assets/ironman', // 只需要指定目录
-                            assetSuffix: '.png',
-                            fps: 30,
-                          ),
-                        );
-                      },
+                    return Opacity(
+                      opacity: _ringOpacityController.value,
+                      child: AnimatedBuilder(
+                        animation: _ringScaleController,
+                        builder: (context, child) {
+                          return AnimatedBuilder(
+                            animation: _pulseController,
+                            builder: (context, child) {
+                              return SizedBox(
+                                width: terminalHeight / 3 * 2,
+                                height: terminalHeight / 3 * 2,
+                                child: JarvisSequencePlayer(
+                                  assetDir: 'assets/ironman', // 只需要指定目录
+                                  assetSuffix: '.png',
+                                  fps: 30,
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
                     );
                   },
                 ),
-              );
-            },
+              ],
+            ),
           ),
-        ],
-      ),
+        ),
+        // 全屏 Vision HUD（顶层，覆盖所有 Agent 特效；退出动画期间保持挂载）
+        Positioned.fill(
+          child: AnimatedBuilder(
+            animation: _visionController,
+            builder: (context, child) => _visionController.showHud
+                ? VisionHudOverlay(controller: _visionController)
+                : const SizedBox.shrink(),
+          ),
+        ),
+      ],
     );
   }
 }

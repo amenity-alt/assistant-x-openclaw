@@ -54,7 +54,12 @@ class _AgentOverlayState extends State<AgentOverlay>
   }
 
   void _handleCommand(String command) {
-    print('[AgentOverlay] Received command: $command');
+    // 大帧（vision:frame base64）只打印长度，避免日志刷屏
+    if (command.startsWith('vision:frame ')) {
+      print('[AgentOverlay] Received vision:frame (${command.length} chars)');
+    } else {
+      print('[AgentOverlay] Received command: $command');
+    }
 
     if (command == 'wake') {
       final now = DateTime.now();
@@ -86,7 +91,10 @@ class _AgentOverlayState extends State<AgentOverlay>
       return;
     }
 
-    print('[AgentOverlay] Dispatching to $_currentAgentName: $command');
+    final dbg = command.length > 300
+        ? '${command.substring(0, 300)}...'
+        : command;
+    print('[AgentOverlay] Dispatching to $_currentAgentName: $dbg');
     setState(() {
       _agents[_currentAgentName]!.handleCommand(command);
     });
