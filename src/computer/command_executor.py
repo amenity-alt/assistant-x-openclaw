@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .action import Action, Risk
 from .action_log import ActionLog
-from . import application_controller
+from . import application_controller, keyboard_controller, mouse_controller, screen_analyzer
 
 _EXEC_TIMEOUT = 20.0  # 单个 Action 执行上限（秒）
 
@@ -46,7 +46,7 @@ class CommandExecutor:
         self._finish(action, ok=result["ok"], detail=result["message"], elapsed=elapsed)
         return result
 
-    # ── 派发表（Phase 1 仅应用控制；后续阶段按 action 扩充） ──
+    # ── 派发表（Phase 2：应用控制 + 键盘 + 语义点击；后续按 action 扩充） ──
     def _dispatch(self, action: Action) -> dict:
         a = action.action
         target = action.target
@@ -57,7 +57,38 @@ class CommandExecutor:
         if a == "switch_app":
             display, _path = application_controller.resolve(target)
             return application_controller.activate_app(display)
+        if a == "type_text":
+            return keyboard_controller.type_text(target)
+        if a == "press_keys":
+            return keyboard_controller.press_keys(target)
+        if a == "click_element":
+            return self._click_element(target, double=False)
+        if a == "double_click_element":
+            return self._click_element(target, double=True)
+        if a == "mouse_move":
+            x, y = action.params.get("x", 0), action.params.get("y", 0)
+            return mouse_controller.move(x, y)
+        if a == "scroll":
+            return mouse_controller.scroll(action.params.get("amount", -3))
         return {"ok": False, "message": f"未知操作: {a}"}
+
+    def _click_element(self, text: str, double: bool = False) -> dict:
+        """语义点击：前台 App AX 树里找「text」元素 → 中心坐标 → 鼠标点击。"""
+        app = screen_analyzer.frontmost_app()
+        if not app:
+            return {"ok": False, "message": "无法获取前台应用"}
+        el = screen_analyzer.find_element(app, text)
+        if not el:
+            return {
+                "ok": False,
+                "message": f"在 {app} 中找不到「{text}」按钮/元素（该应用可能不暴露界面元素）",
+            }
+        x, y = el["center"]
+        kind = "双击" if double else "单击"
+        result = mouse_controller.click(x, y, double=double)
+        if result["ok"]:
+            result["message"] = f"已{kind}「{text}」({int(x)},{int(y)})"
+        return result
 
     # ── 日志与结果 ──────────────────────────────────────
     def _finish(self, action: Action, ok: bool, detail: str = "", elapsed: float = 0.0):

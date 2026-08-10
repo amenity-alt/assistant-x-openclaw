@@ -24,6 +24,12 @@ _ACTION_RISK = {
     "open_app": Risk.AUTO,
     "close_app": Risk.AUTO,
     "switch_app": Risk.AUTO,
+    "type_text": Risk.AUTO,
+    "press_keys": Risk.AUTO,
+    "click_element": Risk.AUTO,
+    "double_click_element": Risk.AUTO,
+    "mouse_move": Risk.AUTO,
+    "scroll": Risk.AUTO,
 }
 
 
