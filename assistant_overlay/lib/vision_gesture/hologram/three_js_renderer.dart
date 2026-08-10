@@ -44,6 +44,16 @@ class ThreeJsRenderer implements HologramRenderer {
 
   bool get loaded => _loaded;
 
+  /// 视觉会话开关：非激活时停帧（不渲染、释放 GPU 忙碌），渲染器保持常驻。
+  void setActive(bool active) {
+    final t = _threeJs;
+    if (t == null) return;
+    t.visible = active;
+    if (active && !_loaded) {
+      loadModel();
+    }
+  }
+
   @override
   Future<void> loadModel() async {
     if (_threeJs != null) return;

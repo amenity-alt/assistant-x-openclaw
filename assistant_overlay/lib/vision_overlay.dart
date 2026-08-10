@@ -297,7 +297,6 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
       animation: widget.controller,
       builder: (context, child) {
         final c = widget.controller;
-        if (!c.showHud) return const SizedBox.shrink();
         final screen = MediaQuery.of(context).size;
         final ringSize = screen.height * 0.42;
         return FadeTransition(
@@ -306,7 +305,27 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
             child: Stack(
               fit: StackFit.expand,
               children: [
+                // 0. 全息核心：常驻挂载（跨会话复用 three_js 渲染器，
+                //    规避上游 dispose/create 泄漏；隐藏时停帧不渲染）
+                if (kUseThreeJsRenderer)
+                  IgnorePointer(
+                    ignoring: !c.showHud,
+                    child: Offstage(
+                      offstage: !c.showHud,
+                      child: Center(
+                        child: SizedBox(
+                          width: ringSize * 0.8,
+                          height: ringSize * 0.8,
+                          child: ThreeJsHologramView(
+                            transform: c.transform,
+                            active: c.showHud,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 // 1. 摄像头背景 + 暗色 HUD 底
+                if (c.showHud) ...[
                 CustomPaint(painter: _VisionBackdropPainter(frame: c.frame)),
                 // 2. 扫描网格 + 扫描线
                 AnimatedBuilder(
@@ -315,15 +334,6 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                     painter: _ScanGridPainter(progress: _scanline.value),
                   ),
                 ),
-                // 2.5 全息核心（默认 three_js 3D；kUseThreeJsRenderer=false 回退 2.5D）
-                if (kUseThreeJsRenderer)
-                  Center(
-                    child: SizedBox(
-                      width: ringSize * 0.8,
-                      height: ringSize * 0.8,
-                      child: ThreeJsHologramView(transform: c.transform),
-                    ),
-                  ),
                 // 3. 中央聚焦环
                 Center(
                   child: AnimatedBuilder(
@@ -358,6 +368,7 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                 _buildRightPanel(c, screen),
                 _buildStatusLine(c, screen),
                 _buildBottomProgress(c, screen),
+                ],
               ],
             ),
           ),

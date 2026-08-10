@@ -8,9 +8,16 @@ import 'three_js_renderer.dart';
 /// 只负责渲染器生命周期与挂载，手势 → 变换由 [TransformController] 驱动，
 /// 本组件不直接处理任何手势。
 class ThreeJsHologramView extends StatefulWidget {
-  const ThreeJsHologramView({super.key, required this.transform});
+  const ThreeJsHologramView({
+    super.key,
+    required this.transform,
+    this.active = true,
+  });
 
   final TransformController transform;
+
+  /// 视觉会话是否激活：激活时创建/恢复渲染，非激活时停帧并保持渲染器常驻。
+  final bool active;
 
   @override
   State<ThreeJsHologramView> createState() => _ThreeJsHologramViewState();
@@ -28,7 +35,20 @@ class _ThreeJsHologramViewState extends State<ThreeJsHologramView> {
         if (mounted) setState(() {});
       },
     );
-    _renderer!.loadModel();
+    // 延迟到首次激活才初始化 GPU 资源（应用启动时不预加载）
+    if (widget.active) _renderer!.loadModel();
+  }
+
+  @override
+  void didUpdateWidget(covariant ThreeJsHologramView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final r = _renderer;
+    if (r == null) return;
+    if (widget.active && !r.loaded) {
+      r.loadModel();
+    } else if (oldWidget.active != widget.active) {
+      r.setActive(widget.active);
+    }
   }
 
   @override

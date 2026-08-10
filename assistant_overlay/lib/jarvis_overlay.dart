@@ -1211,12 +1211,7 @@ class JarvisAgentVisual implements AgentVisual {
         ),
         // 全屏 Vision HUD（顶层，覆盖所有 Agent 特效；退出动画期间保持挂载）
         Positioned.fill(
-          child: AnimatedBuilder(
-            animation: _visionController,
-            builder: (context, child) => _visionController.showHud
-                ? VisionHudOverlay(controller: _visionController)
-                : const SizedBox.shrink(),
-          ),
+          child: VisionHudOverlay(controller: _visionController),
         ),
       ],
     );
