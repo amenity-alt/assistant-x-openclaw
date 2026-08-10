@@ -1923,7 +1923,11 @@ class VoiceAssistant:
                             print(f"\r✓ 识别: {result}", end="", flush=True)
                         # 地图/视觉类指令在流式阶段不刷输入框（避免 ASR 回声把话术重复打入），
                         # 最终判定为真指令时在下方统一显示一次。
-                        if not self._map_like(result) and not self._vision_like(result):
+                        if (
+                            not self._map_like(result)
+                            and not self._vision_like(result)
+                            and not self._computer_like(result)
+                        ):
                             self.visual.show_user_text(result)
 
                     _early_recog = (
@@ -2070,6 +2074,14 @@ class VoiceAssistant:
 
                             # 视觉模式指令（开启/关闭视觉扫描）→ 直接驱动 overlay，不进大模型
                             if self._handle_vision_command(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
+                            # 电脑控制指令（打开/输入/点击/截图等）→ 本地能力执行，不进大模型
+                            if self._handle_computer_command(recognition_result):
                                 self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
                                 recognition_stream = self.recognizer.create_stream()
@@ -2764,6 +2776,116 @@ class VoiceAssistant:
         self.visual.show_ai_text(hud)
         threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
         return True
+
+    # ── 电脑控制（Computer Control）指令 ────────────────────
+    # 本地能力拦截（与地图/视觉同级）：打开/关闭/切换应用、输入文字、按键、
+    # 语义点击、截图、查看屏幕、列出应用；确认口播跟随角色语言（贾维斯英文/林妹妹中文）。
+    # 防 ASR 回声/流式重发的去重窗口（同视觉模式）。
+    _COMPUTER_DEDUP_TTL = 15.0
+    _last_computer_norm = ""
+    _last_computer_ts = 0.0
+    _COMPUTER_LIKE_RE = re.compile(
+        r"^(?:(?:请|帮我|麻烦|给我)?(?:打开一下|帮我打开|打开|开启|启动|运行|关闭|关掉|"
+        r"关一下|退出|结束|切换到|切换|切到|输入|打字|按下|按一下|快捷键|点击|点一下|单击|"
+        r"双击|截屏|截图|查看屏幕|看屏幕|屏幕上有什么|现在开着什么|打开的应用|哪些应用在运行)"
+        r"\s*.{0,40}"
+        r"|(?:请|帮我|麻烦)?(?:把|将).{1,20}(?:打开|关闭|关掉|启动|运行|切到|切换到)"
+        r"|(?:please |plz )?(?:open|launch|start|run|close|quit|switch to|switch|type|press|"
+        r"click|double click|screenshot|take a screenshot|describe screen|list apps)"
+        r"\s*.{0,40})$",
+        re.I,
+    )
+
+    def _computer_like(self, t: str) -> bool:
+        """流式识别阶段的电脑指令预判（避免回声把文字刷进输入框）。"""
+        return bool(self._COMPUTER_LIKE_RE.match((t or "").strip()))
+
+    def _handle_computer_command(self, text: str) -> bool:
+        """识别电脑控制指令：返回 True 表示已消费，不进大模型。"""
+        t = (text or "").strip()
+        if not t or not self._computer_like(t):
+            return False
+        now = time.time()
+        norm = re.sub(r"\s+", "", t).lower()
+        if (
+            norm == self._last_computer_norm
+            and now - self._last_computer_ts < self._COMPUTER_DEDUP_TTL
+        ):
+            print(f"[Computer] 重复指令忽略: {t}")
+            return True
+        try:
+            from computer import get_computer_agent
+
+            agent = get_computer_agent()
+            if agent.brain.bridge is None and getattr(self, "openclaw", None) is not None:
+                agent.bind_bridge(self.openclaw)
+            if not agent.handle(t):
+                return False
+        except Exception as e:
+            print(f"[Computer] 模块加载失败: {e}")
+            return False
+        self._last_computer_norm = norm
+        self._last_computer_ts = now
+        # 异步执行完成 → 角色语言确认口播 + overlay 文本（不阻塞语音主循环）
+        future = agent.executor.last_future()
+        if future is not None:
+
+            def _cb(f):
+                try:
+                    if not f.cancelled():
+                        self._computer_speak(f.result())
+                except Exception as e:
+                    print(f"[Computer] 结果回调失败: {e}")
+
+            future.add_done_callback(_cb)
+        return True
+
+    def _computer_speak(self, result: dict):
+        """电脑操作结果确认（角色语言）+ overlay 文本。"""
+        try:
+            zh = self._current_lang() == "zh"
+            action = result.get("action", "")
+            ok = result.get("ok")
+            target = result.get("target", "") or ""
+            display = result.get("display") or target
+            apps = result.get("apps")
+            detail = result.get("message") or result.get("detail") or ""
+            if not ok:
+                msg = f"操作失败：{detail}" if zh else f"I couldn't complete that. {detail}"
+            elif action == "open_app":
+                msg = f"已打开 {target}。" if zh else f"Opened {display}."
+            elif action == "close_app":
+                msg = f"已关闭 {target}。" if zh else f"Closed {display}."
+            elif action == "switch_app":
+                msg = f"已切换到 {target}。" if zh else f"Switched to {display}."
+            elif action == "type_text":
+                msg = f"已输入 {target}。" if zh else "Done. Text entered."
+            elif action == "press_keys":
+                msg = f"已按下 {target}。" if zh else "Key command executed."
+            elif action == "click_element":
+                msg = f"已点击 {target}。" if zh else f"Clicked {target}."
+            elif action == "double_click_element":
+                msg = f"已双击 {target}。" if zh else f"Double-clicked {target}."
+            elif action == "take_screenshot":
+                msg = "截图完成。" if zh else "Screenshot taken."
+            elif action == "get_screen_state":
+                msg = detail if zh else "Screen captured and analyzed. I can describe what is on screen."
+            elif action == "list_apps":
+                msg = (
+                    "正在运行：" + "、".join(apps or [])
+                    if zh
+                    else "Running: " + ", ".join(apps or [])
+                )
+            else:
+                msg = detail if zh else "Done."
+            overlay_msg = detail if detail else msg
+            try:
+                self.visual.show_ai_text(overlay_msg)
+            except Exception as e:
+                print(f"[Computer] overlay 文本失败: {e}")
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        except Exception as e:
+            print(f"[Computer] 确认口播失败: {e}")
 
     def _map_clean_city(self, candidate: str) -> str:
         """从 ASR 提取的地点名中归一化出真实地名。

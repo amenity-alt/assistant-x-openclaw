@@ -31,11 +31,18 @@ class CommandExecutor:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="computer")
         self._lock = threading.Lock()
         self._last_result = None  # 最近一次执行结果（Phase 5 口播用）
+        self._last_future = None  # 最近一次提交的 future（结果回调）
 
     # ── 提交与执行 ──────────────────────────────────────
     def submit(self, action: Action):
         """入队执行（异步）。返回 future，不阻塞调用方。"""
-        return self._pool.submit(self.execute, action)
+        with self._lock:
+            self._last_future = self._pool.submit(self.execute, action)
+        return self._last_future
+
+    def last_future(self):
+        with self._lock:
+            return self._last_future
 
     def execute(self, action: Action) -> dict:
         """同步执行单个 Action（内部自带超时）。"""
@@ -48,6 +55,9 @@ class CommandExecutor:
             result = {"ok": False, "message": f"执行异常: {e}"}
         result.setdefault("ok", False)
         result.setdefault("message", "")
+        result.setdefault("action", action.action)
+        result.setdefault("target", action.target)
+        result.setdefault("risk", action.risk.value)
         elapsed = round(time.time() - started, 2)
         result["elapsed"] = elapsed
         self._finish(

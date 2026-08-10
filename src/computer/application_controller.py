@@ -200,15 +200,15 @@ def open_app(name: str) -> dict:
     if err:
         return {"ok": False, "message": err}
     activate_app(display)  # 打开后置前，保证用户看到
-    return {"ok": True, "message": f"已打开 {display}"}
+    return {"ok": True, "message": f"已打开 {display}", "display": display}
 
 
 def activate_app(display: str) -> dict:
     """把应用切到前台（未运行则先启动）。"""
     code, out, err = osascript(f"tell application {quote(display)} to activate")
     if code == 0:
-        return {"ok": True, "message": f"已切换到 {display}"}
-    return {"ok": False, "message": f"激活失败: {err or out}"}
+        return {"ok": True, "message": f"已切换到 {display}", "display": display}
+    return {"ok": False, "message": f"激活失败: {err or out}", "display": display}
 
 
 def close_app(name: str) -> dict:
@@ -218,7 +218,7 @@ def close_app(name: str) -> dict:
         f"tell application {quote(display)} to quit", timeout=20.0
     )
     if code == 0:
-        return {"ok": True, "message": f"已关闭 {display}"}
+        return {"ok": True, "message": f"已关闭 {display}", "display": display}
     # 降级：System Events 点击 Quit 菜单（需要辅助功能权限）
     code2, out2, err2 = osascript(
         f'tell application "System Events" to tell process {quote(display)} '
@@ -227,8 +227,8 @@ def close_app(name: str) -> dict:
         timeout=20.0,
     )
     if code2 == 0:
-        return {"ok": True, "message": f"已关闭 {display}"}
-    return {"ok": False, "message": f"关闭失败: {err or out} / {err2 or out2}"}
+        return {"ok": True, "message": f"已关闭 {display}", "display": display}
+    return {"ok": False, "message": f"关闭失败: {err or out} / {err2 or out2}", "display": display}
 
 
 def list_running_apps() -> list:
