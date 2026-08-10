@@ -16,6 +16,7 @@ import threading
 
 from .action import Action, Risk
 from .action_log import ActionLog
+from .brain_parser import BrainParser
 from .command_executor import CommandExecutor
 from . import application_controller, intent_parser, permission_manager
 
@@ -27,14 +28,28 @@ class ComputerAgent:
         self.log = ActionLog()
         self.executor = CommandExecutor(self.log)
         self.permissions = permission_manager.PermissionManager()
+        self.brain = BrainParser()
+        self._brain_enabled = False
+
+    # ── 大脑接入（Phase 4：本地解析兜底 → 约束 JSON 解析） ────
+    def bind_bridge(self, bridge, enabled: bool = True):
+        """绑定现有语音 bridge（Hermes/OpenClaw）；解析用独立会话，不污染语音历史。"""
+        self.brain.bind_bridge(bridge)
+        self._brain_enabled = enabled
+
+    def set_brain_enabled(self, enabled: bool):
+        self._brain_enabled = enabled
 
     # ── 入口 ────────────────────────────────────────────
     def handle(self, text: str) -> bool:
         """解析并异步入队执行；返回 True 表示指令已被消费（不进大模型）。
 
+        本地规则解析优先；解析不到且已绑定 bridge 时，走大脑约束 JSON 解析。
         权限未授权时不执行，仅返回引导信息（写入日志）。
         """
         action = intent_parser.parse(text)
+        if action is None and self._brain_enabled:
+            action = self.brain.parse(text)
         if action is None:
             return False
         if not self.permissions.accessibility_enabled():
