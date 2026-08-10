@@ -6,7 +6,10 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import 'hud_terminal_shell.dart';
+import 'vision_gesture/gesture_controller.dart';
+import 'vision_gesture/gesture_recognizer.dart';
 import 'vision_gesture/hologram/three_js_hologram_view.dart';
+import 'vision_gesture/transform_controller.dart';
 
 /// Jarvis Vision Mode 全屏 HUD（Capability，非 Agent）
 ///
@@ -35,11 +38,13 @@ enum VisionMode {
 class VisionHand {
   final String label;
   final double score;
-  final List<Offset> landmarks; // 21 点
+  final List<Offset> landmarks; // 21 点 (x, y)
+  final List<double> depths; // 21 点深度 z（手势识别用）
   const VisionHand({
     required this.label,
     required this.score,
     required this.landmarks,
+    this.depths = const [],
   });
 }
 
@@ -60,6 +65,11 @@ class VisionHudController extends ChangeNotifier {
   ui.Image? frame;
   List<VisionHand> hands = const [];
   String error = '';
+  GesturePhase gesturePhase = GesturePhase.idle;
+
+  /// 手势 → 变换链路（跨 Vision 会话常驻，退出视觉后保持模型姿态）
+  late final TransformController transform = TransformController();
+  late final GestureController gesture = GestureController(transform: transform);
 
   /// 是否应挂载 HUD（运行中或正在退出动画）
   bool get showHud => mode != VisionMode.off || animatingOut;
@@ -84,6 +94,8 @@ class VisionHudController extends ChangeNotifier {
     _releaseFrame();
     hands = const [];
     error = '';
+    gesture.resetTracking();
+    gesturePhase = GesturePhase.idle;
     notifyListeners();
   }
 
@@ -143,24 +155,42 @@ class VisionHudController extends ChangeNotifier {
     try {
       final data = jsonDecode(jsonStr) as Map<String, dynamic>;
       final list = (data['hands'] as List?) ?? const [];
-      hands = list.map((e) {
+      final parsed = list.map((e) {
         final m = e as Map<String, dynamic>;
-        final lms = ((m['landmarks'] as List?) ?? const []).map((p) {
+        final lms = <Offset>[];
+        final depths = <double>[];
+        for (final p in ((m['landmarks'] as List?) ?? const [])) {
           final pt = p as List;
-          return Offset(
+          lms.add(Offset(
             (pt[0] as num).toDouble(),
             (pt[1] as num).toDouble(),
-          );
-        }).toList();
+          ));
+          depths.add(pt.length > 2 ? (pt[2] as num).toDouble() : 0);
+        }
         return VisionHand(
           label: m['label']?.toString() ?? 'HAND',
           score: (m['score'] as num?)?.toDouble() ?? 0,
           landmarks: lms,
+          depths: depths,
         );
       }).toList();
+      hands = parsed;
       if (hands.isNotEmpty && mode == VisionMode.scanning) {
         mode = VisionMode.handDetected;
       }
+      // 手势管线：手势帧 → 状态机 → TransformController（~10fps）
+      final gestureHands = <GestureHand>[];
+      for (final h in parsed) {
+        if (h.landmarks.length != 21 || h.depths.length != 21) continue;
+        final flat = <double>[];
+        for (var i = 0; i < 21; i++) {
+          flat.add(h.landmarks[i].dx);
+          flat.add(h.landmarks[i].dy);
+          flat.add(h.depths[i]);
+        }
+        gestureHands.add(GestureHand(score: h.score, landmarks: flat));
+      }
+      gesturePhase = gesture.process(gestureHands);
       notifyListeners();
     } catch (_) {}
   }
@@ -173,6 +203,8 @@ class VisionHudController extends ChangeNotifier {
   @override
   void dispose() {
     _releaseFrame();
+    gesture.resetTracking();
+    transform.dispose();
     super.dispose();
   }
 }
@@ -287,7 +319,7 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                   child: SizedBox(
                     width: ringSize * 0.8,
                     height: ringSize * 0.8,
-                    child: const ThreeJsHologramView(),
+                    child: ThreeJsHologramView(transform: c.transform),
                   ),
                 ),
                 // 3. 中央聚焦环
@@ -584,7 +616,7 @@ String _subLabel(VisionHudController c) {
           ? 'SCANNING ENVIRONMENT'
           : 'HAND TRACKING STANDBY';
     case VisionMode.handDetected:
-      return 'TRACKING ACTIVE · AI PROCESSING';
+      return _gestureText(c);
     case VisionMode.analyzing:
       return 'AI PROCESSING FEED';
     case VisionMode.completed:
@@ -593,6 +625,21 @@ String _subLabel(VisionHudController c) {
       return c.error.isNotEmpty ? c.error : 'CAMERA OFFLINE · RETRY';
     case VisionMode.off:
       return '';
+  }
+}
+
+String _gestureText(VisionHudController c) {
+  switch (c.gesturePhase) {
+    case GesturePhase.zooming:
+      return 'PINCH ZOOM · SCALE x${c.transform.value.scale.toStringAsFixed(2)}';
+    case GesturePhase.rotating:
+      return 'GESTURE ROTATE · ROLL/PITCH';
+    case GesturePhase.moving:
+      return 'GESTURE MOVE · TRACKING';
+    case GesturePhase.pinchReady:
+      return 'PINCH READY';
+    default:
+      return 'TRACKING ACTIVE · GESTURE READY';
   }
 }
 
