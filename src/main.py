@@ -2936,6 +2936,8 @@ def _enforce_single_instance():
     """启动时确保只有一个实例：杀掉 PID 文件中记录的其它存活实例。
 
     重启竞态下可能并发拉起多个 main.py，此处兜底收敛到单个进程。
+    注意：只终止「确实是本语音助手」的旧实例（校验命令行含 main.py 与
+    本工作目录），PID 一旦被其他应用复用绝不误杀。
     """
     try:
         if not os.path.exists(PID_FILE):
@@ -2954,6 +2956,13 @@ def _enforce_single_instance():
     except OSError:
         return  # 旧进程已不存在
 
+    if not _is_voice_assistant_pid(old_pid):
+        print(
+            f"[单例] PID={old_pid} 已被其他进程复用（不是本助手），"
+            "跳过终止以避免误杀其他应用"
+        )
+        return
+
     print(f"[单例] 检测到已有助手实例 PID={old_pid}，正在终止以避免重复进程...")
     try:
         os.kill(old_pid, signal.SIGKILL)
@@ -2968,6 +2977,26 @@ def _enforce_single_instance():
             time.sleep(0.1)
         except OSError:
             break
+
+
+def _is_voice_assistant_pid(pid: int) -> bool:
+    """校验 PID 是否真的是本语音助手（main.py）进程。
+
+    通过 `ps -p <pid> -o command=` 检查命令行是否同时包含 main.py 与
+    本工作目录路径，防止 PID 复用导致误杀其他应用（如用户的语音控制助手）。
+    """
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        ).stdout or ""
+    except Exception:
+        return False
+    return "main.py" in out and _PROJECT_DIR in out
 
 
 def assert_file_exists(filename):
