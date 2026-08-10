@@ -72,7 +72,7 @@ vision:hand（TCP 17889，~10fps，21 点 xyz 归一化）
 
 - 渲染：ANGLE/Metal 硬件加速 + 外部纹理合成，目标 60fps；场景规模（<1 万线/点）对桌面 GPU 压力极小。
 - 包体积：app 128MB（MetalANGLE `libEGL`+`libGLESv2` 约 9MB，其余为 App/Flutter 框架），与预估一致。
-- 生命周期：Vision OFF → `removeModel()`（场景移除 + 几何/材质 dispose）→ `dispose()`（渲染器/纹理/上下文释放）；Vision ON → 重新创建。
+- 生命周期：渲染器**常驻**（首次 Vision 激活时初始化）；Vision OFF → 停帧（`visible=false`，不渲染、不释放）；Vision ON → 恢复渲染；应用退出时才 `dispose()` 释放 GPU/纹理。
 - **上游泄漏规避（已实现）**：three_js issue #84（macOS/iOS 反复 dispose+create 内存泄漏，open）。`ThreeJsHologramView` 已挂在**常驻**的 `VisionHudOverlay`（不再随会话卸载），首次激活才初始化 GPU；会话间仅切换 `ThreeJS.visible`（停帧、不渲染），**不再每次 dispose/create**，模型姿态与缩放/旋转跨会话保留；应用退出时才整体释放。
 - 自适应降级（samples/分辨率/粒子数）未实现，作为后续优化项（当前负载远低于阈值）。
 
