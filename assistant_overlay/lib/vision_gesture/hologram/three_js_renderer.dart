@@ -27,6 +27,11 @@ class ThreeJsRenderer implements HologramRenderer {
   three.Mesh? _ringX;
   three.Mesh? _ringY;
   three.Points? _particles;
+  three.Mesh? _glow;
+  three.Mesh? _scanSweep;
+  three.Mesh? _scanSlice;
+  three.LineSegments? _grid;
+  double _sweepPhase = 0;
 
   // 阻尼插值当前值
   double _curScale = 1.0;
@@ -132,7 +137,60 @@ class ThreeJsRenderer implements HologramRenderer {
     _particles = _buildParticles(180);
     _root!.add(_particles!);
 
-    // 部件微自转 + 手势变换阻尼
+    // 发光外壳（加色混合伪造辉光）
+    _glow = three.Mesh(
+      three.IcosahedronGeometry(1.55, 2),
+      three.MeshBasicMaterial({
+        three.MaterialProperty.color: 0x29c8ff,
+        three.MaterialProperty.wireframe: true,
+        three.MaterialProperty.transparent: true,
+        three.MaterialProperty.opacity: 0.16,
+        three.MaterialProperty.blending: three.AdditiveBlending,
+        three.MaterialProperty.depthWrite: false,
+      }),
+    );
+    _root!.add(_glow!);
+
+    // 水平扫描环：沿模型上下往返扫描
+    _scanSweep = three.Mesh(
+      three.RingGeometry(1.38, 1.46, 96),
+      three.MeshBasicMaterial({
+        three.MaterialProperty.color: 0x37e6ff,
+        three.MaterialProperty.transparent: true,
+        three.MaterialProperty.opacity: 0.45,
+        three.MaterialProperty.blending: three.AdditiveBlending,
+        three.MaterialProperty.depthWrite: false,
+        three.MaterialProperty.side: three.DoubleSide,
+      }),
+    )..rotation.x = math.pi / 2;
+    _root!.add(_scanSweep!);
+
+    // 垂直扫描切片：绕 Y 慢速旋转
+    _scanSlice = three.Mesh(
+      three.RingGeometry(0, 1.7, 96),
+      three.MeshBasicMaterial({
+        three.MaterialProperty.color: 0x33e0ff,
+        three.MaterialProperty.transparent: true,
+        three.MaterialProperty.opacity: 0.05,
+        three.MaterialProperty.blending: three.AdditiveBlending,
+        three.MaterialProperty.depthWrite: false,
+        three.MaterialProperty.side: three.DoubleSide,
+      }),
+    );
+    _root!.add(_scanSlice!);
+
+    // 全息网格底座（固定在场景中，不随模型缩放）
+    _grid = three.LineSegments(
+      _buildGridGeometry(12, 3.0),
+      three.LineBasicMaterial({
+        three.MaterialProperty.color: 0x1a9ec9,
+        three.MaterialProperty.transparent: true,
+        three.MaterialProperty.opacity: 0.35,
+      }),
+    )..position.y = -1.75;
+    t.scene.add(_grid!);
+
+    // 部件微自转 + 扫描动画 + 手势变换阻尼
     t.addAnimationEvent((dt) {
       _core?.rotation.y += dt * 0.12;
       _core?.rotation.x += dt * 0.03;
@@ -141,6 +199,9 @@ class ThreeJsRenderer implements HologramRenderer {
       _ringX?.rotation.z += dt * 0.06;
       _ringY?.rotation.x += dt * 0.05;
       _particles?.rotation.y -= dt * 0.02;
+      _sweepPhase += dt * 1.1;
+      _scanSweep?.position.y = math.sin(_sweepPhase) * 1.3;
+      _scanSlice?.rotation.y += dt * 0.35;
       _dampToTarget(dt);
     });
 
@@ -161,6 +222,22 @@ class ThreeJsRenderer implements HologramRenderer {
     _root?.rotation.set(_curRotX, _curRotY, _curRotZ);
     // 归一化位移 → 世界单位（相机 z=4.4，模型半径 ~1.15）
     _root?.position.setValues(_curPosX * 2.6, _curPosY * 2.6, 0);
+  }
+
+  three.BufferGeometry _buildGridGeometry(int cells, double half) {
+    final pts = <double>[];
+    final step = (2 * half) / cells;
+    for (var i = 0; i <= cells; i++) {
+      final p = -half + i * step;
+      pts.addAll([p, 0, -half, p, 0, half]);
+      pts.addAll([-half, 0, p, half, 0, p]);
+    }
+    final geo = three.BufferGeometry()
+      ..setAttributeFromString(
+        'position',
+        three.BufferAttribute.fromUnknown(Float32List.fromList(pts), 3),
+      );
+    return geo;
   }
 
   three.Points _buildParticles(int count) {
@@ -187,6 +264,8 @@ class ThreeJsRenderer implements HologramRenderer {
         three.MaterialProperty.sizeAttenuation: true,
         three.MaterialProperty.transparent: true,
         three.MaterialProperty.opacity: 0.85,
+        three.MaterialProperty.blending: three.AdditiveBlending,
+        three.MaterialProperty.depthWrite: false,
       }),
     );
   }
@@ -212,6 +291,12 @@ class ThreeJsRenderer implements HologramRenderer {
     _ringX = null;
     _ringY = null;
     _particles = null;
+    _glow = null;
+    _scanSweep = null;
+    _scanSlice = null;
+    _grid?.geometry?.dispose();
+    _grid?.material?.dispose();
+    _grid = null;
     _loaded = false;
   }
 

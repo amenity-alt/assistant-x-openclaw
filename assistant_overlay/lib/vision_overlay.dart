@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'hud_terminal_shell.dart';
 import 'vision_gesture/gesture_controller.dart';
 import 'vision_gesture/gesture_recognizer.dart';
+import 'vision_gesture/hologram/renderer_config.dart';
 import 'vision_gesture/hologram/three_js_hologram_view.dart';
 import 'vision_gesture/transform_controller.dart';
 
@@ -314,14 +315,15 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                     painter: _ScanGridPainter(progress: _scanline.value),
                   ),
                 ),
-                // 2.5 全息核心（three_js 3D，Phase 1 技术验证）
-                Center(
-                  child: SizedBox(
-                    width: ringSize * 0.8,
-                    height: ringSize * 0.8,
-                    child: ThreeJsHologramView(transform: c.transform),
+                // 2.5 全息核心（默认 three_js 3D；kUseThreeJsRenderer=false 回退 2.5D）
+                if (kUseThreeJsRenderer)
+                  Center(
+                    child: SizedBox(
+                      width: ringSize * 0.8,
+                      height: ringSize * 0.8,
+                      child: ThreeJsHologramView(transform: c.transform),
+                    ),
                   ),
-                ),
                 // 3. 中央聚焦环
                 Center(
                   child: AnimatedBuilder(
