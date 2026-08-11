@@ -36,6 +36,9 @@ _ACTION_SYNONYMS = {
     "none": "none", "noop": "none", "null": "none",
 }
 
+# 所有合法 action 的集合（= synonyms 的取值去掉 none），白名单 O(1) 判定
+_ALLOWED_ACTIONS = frozenset(v for v in _ACTION_SYNONYMS.values() if v != "none")
+
 _PROMPT = """你是电脑控制指令解析器。只输出一个 JSON 对象，不要输出任何其他文字、不要用代码块。
 把用户指令解析成电脑操作：
 {"action": "open_app", "target": "应用名"}  打开/启动应用
@@ -135,11 +138,7 @@ class BrainParser:
         action = _ACTION_SYNONYMS.get(action, action)
         if action == "none":
             return None
-        if action not in _ACTION_SYNONYMS.values() and action not in (
-            "open_app", "close_app", "switch_app", "type_text", "press_keys",
-            "click_element", "double_click_element", "take_screenshot",
-            "get_screen_state", "list_apps", "scroll",
-        ):
+        if action not in _ALLOWED_ACTIONS:
             return None
         target = str(data.get("target", "")).strip()[:100]
         params = data.get("params") or {}
