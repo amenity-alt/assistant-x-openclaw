@@ -319,6 +319,59 @@ class HermesBridge:
                     self._current_request_id = None
             return None
 
+    def send_image_and_wait(self, image_b64: str, prompt: str, timeout: float = 30.0):
+        """OpenAI 兼容图像理解：image_url(base64 data URL) + 文本提示。
+
+        用于 Jarvis Spatial Vision 的物体识别/场景描述；网关/模型是否支持
+        图像输入取决于部署（Hermes / DeepSeek 等），不支持时返回 None，
+        由调用方回退本地识别（软失败）。不写入会话历史。
+        """
+        if not self._ready():
+            return None
+        if not image_b64 or not prompt:
+            return None
+        try:
+            resp = requests.post(
+                f"{self.gateway_url}/v1/chat/completions",
+                headers=self._headers(),
+                json={
+                    "model": self.profile,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_b64}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "stream": False,
+                },
+                timeout=timeout or self.timeout,
+            )
+            data = resp.json()
+            if resp.status_code != 200:
+                logger.warning(
+                    "图像理解 HTTP %s: %s",
+                    resp.status_code,
+                    json.dumps(data, ensure_ascii=False)[:200],
+                )
+                return None
+            choices = data.get("choices", [])
+            if choices:
+                reply = choices[0].get("message", {}).get("content", "")
+                if reply:
+                    return reply
+            return None
+        except Exception as e:
+            logger.error("图像理解请求异常: %s", e)
+            return None
+
 
 def get_bridge(**kwargs) -> HermesBridge:
     return HermesBridge(**kwargs)

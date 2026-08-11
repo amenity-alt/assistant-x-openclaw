@@ -80,11 +80,21 @@ class VisionManager:
         self._proc = None
         self._visual = None
         self._fps_interval = 1.0 / _SEND_FPS
+        # Spatial Vision：当前帧缓存 / 物体识别扫描
+        self._last_jpeg = None
+        self._scan_enabled = False
+        self._scan_thread = None
+        self.on_object = None  # 识别结果回调（main.py 注册，用于语音口播）
+        self.role = "jarvis"  # 当前角色（识别网关 profile）
 
     # ── 绑定当前角色 visual ──────────────────────────────
     def bind_visual(self, visual):
         """绑定当前角色 visual（角色切换时由 main.py 更新）。"""
         self._visual = visual
+
+    def set_role(self, role: str):
+        """绑定当前角色 id（识别网关 profile 用）。"""
+        self.role = role or "jarvis"
 
     def _send(self, command: str, quiet: bool = False):
         v = self._visual
@@ -118,6 +128,7 @@ class VisionManager:
             was_active = self._active
             self._active = False
             self._stop_event.set()
+            self._scan_enabled = False
         if not was_active:
             return
         # 直接杀掉 ffmpeg，让阻塞在 read 的帧线程立刻退出
@@ -128,6 +139,61 @@ class VisionManager:
 
     def stop_if_active(self):
         self.stop()
+
+    # ── Spatial Vision：物体识别扫描 ─────────────────────────
+    def last_frame(self) -> bytes | None:
+        """最近一帧 JPEG（物体识别用；无帧返回 None）。"""
+        with self._lock:
+            return self._last_jpeg
+
+    def send_object(self, result: dict):
+        """推送 vision:object <json> 给 overlay（右侧识别结果面板）。"""
+        payload = json.dumps(result, ensure_ascii=False)
+        self._send(f"vision:object {payload}", quiet=True)
+
+    def set_object_scan(self, enabled: bool):
+        """开关物体扫描（低频 ~2s/次，独立线程，不阻塞语音/帧流）。"""
+        with self._lock:
+            if enabled == self._scan_enabled:
+                return
+            self._scan_enabled = enabled
+        if enabled:
+            t = self._scan_thread
+            if t is None or not t.is_alive():
+                self._scan_thread = threading.Thread(
+                    target=self._object_scan_loop, daemon=True, name="vision-object-scan"
+                )
+                self._scan_thread.start()
+
+    def _object_scan_loop(self):
+        """低频轮询识别：抓当前帧 → 识别 → 推送 + 回调。"""
+        try:
+            from vision_object import get_object_recognizer
+
+            while self._scan_enabled:
+                jpeg = self.last_frame()
+                if jpeg:
+                    self._send(f"vision:status {STATE_ANALYZING}")
+                    try:
+                        result = get_object_recognizer().recognize(jpeg, self.role)
+                    except Exception as e:
+                        print(f"[Vision] 物体识别异常: {e}")
+                        result = None
+                    if result:
+                        self.send_object(result)
+                        self._send(f"vision:status {STATE_COMPLETED}")
+                        cb = self.on_object
+                        if cb is not None:
+                            try:
+                                cb(result)
+                            except Exception as e:
+                                print(f"[Vision] 识别回调异常: {e}")
+                    else:
+                        self._send(f"vision:status {STATE_SCANNING}")
+                time.sleep(2.0)
+        finally:
+            with self._lock:
+                self._scan_enabled = False
 
     # ── 帧采集 ───────────────────────────────────────────
     @staticmethod
@@ -262,6 +328,8 @@ class VisionManager:
                 if now - last_send >= self._fps_interval:
                     last_send = now
                     self._send_frame(jpeg)
+                    with self._lock:
+                        self._last_jpeg = jpeg
                     hand = None
                     if tracker is not None:
                         hand = tracker.process(jpeg)

@@ -200,42 +200,51 @@ from assistants import (
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ASSISTANTS_CFG_PATH = os.path.join(_PROJECT_DIR, "assistants.json")
 
+# assistants.json 按 (mtime, size) 缓存：启动时四个 _load_* 不再各读一遍文件，
+# 文件被外部修改时仍会自动重读（保留热重载语义）。
+_assistants_json_cache = {"key": None, "data": {}}
+
+
+def _load_assistants_json() -> dict:
+    """读取 assistants.json 顶层配置；失败返回空 dict（调用方各自回退默认值）。"""
+    try:
+        st = os.stat(_ASSISTANTS_CFG_PATH)
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _assistants_json_cache["key"] == key:
+        return _assistants_json_cache["data"]
+    try:
+        with open(_ASSISTANTS_CFG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    _assistants_json_cache["key"] = key
+    _assistants_json_cache["data"] = data
+    return data
+
 
 # ── 主脑引擎选择（assistants.json 顶层 engine 字段，默认 openclaw）──────────
 def _load_engine() -> str:
     """读取 assistants.json 顶层 engine：openclaw（默认）| hermes。"""
-    try:
-        with open(_ASSISTANTS_CFG_PATH, "r", encoding="utf-8") as f:
-            return (json.load(f).get("engine") or "openclaw").strip().lower()
-    except Exception:
-        return "openclaw"
+    return (_load_assistants_json().get("engine") or "openclaw").strip().lower()
 
 
 def _load_overlay_debug() -> bool:
     """读取 assistants.json 顶层 overlay_debug_mode：true 时特效召唤后不隐藏。"""
-    try:
-        with open(_ASSISTANTS_CFG_PATH, "r", encoding="utf-8") as f:
-            return bool(json.load(f).get("overlay_debug_mode", False))
-    except Exception:
-        return False
+    return bool(_load_assistants_json().get("overlay_debug_mode", False))
 
 
 def _load_dock_autohide() -> bool:
     """读取 assistants.json 顶层 dock_autohide_on_wake：true 时激活期自动隐藏 Dock。"""
-    try:
-        with open(_ASSISTANTS_CFG_PATH, "r", encoding="utf-8") as f:
-            return bool(json.load(f).get("dock_autohide_on_wake", False))
-    except Exception:
-        return False
+    return bool(_load_assistants_json().get("dock_autohide_on_wake", False))
 
 
 def _load_map_dashboard() -> bool:
     """读取 assistants.json 顶层 map_dashboard_on_wake：true 时唤醒确保地图服务在线（overlay 卡片）。"""
-    try:
-        with open(_ASSISTANTS_CFG_PATH, "r", encoding="utf-8") as f:
-            return bool(json.load(f).get("map_dashboard_on_wake", True))
-    except Exception:
-        return True
+    return bool(_load_assistants_json().get("map_dashboard_on_wake", True))
 
 
 _ENGINE = _load_engine()
@@ -356,17 +365,29 @@ def _check_speaker_model():
 
 
 def _load_speakers():
-    """加载已注册的声纹列表"""
-    if os.path.exists(_SPEAKER_FILE):
-        with open(_SPEAKER_FILE, 'r') as f:
-            return json.load(f)
-    return []
+    """加载已注册的声纹列表；文件不存在/损坏时返回空列表，不让启动崩溃。"""
+    try:
+        with open(_SPEAKER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 
 def _save_speakers(speakers):
-    """保存声纹列表到文件"""
-    with open(_SPEAKER_FILE, 'w') as f:
-        json.dump(speakers, f, indent=2)
+    """原子保存声纹列表：先写同目录临时文件再 rename，避免写入中断损坏数据。"""
+    os.makedirs(_SPEAKER_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=_SPEAKER_DIR, prefix="speakers.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(speakers, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, _SPEAKER_FILE)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _create_speaker_extractor():
@@ -541,16 +562,20 @@ def _random_exit_line() -> str:
     return random.choice(EXIT_LINES)
 
 
+# 预编译：_clean_for_tts 每段 TTS 文本都会调用，避免反复 re.sub 内联编译
+_TTS_MARKDOWN_RE = re.compile(r"[*`#>\-]+")
+_TTS_EMOJI_RE = re.compile(r"[\U0001f300-\U0001f9ff\u2600-\u26ff\u2700-\u27bf]")
+_TTS_WHITESPACE_RE = re.compile(r"\s+")
+
+
 def _clean_for_tts(text: str) -> str:
     """清理文本，适合 TTS 朗读"""
-    import re
-
     # 去掉 markdown 符号
-    text = re.sub(r"[*`#>\-]+", "", text)
+    text = _TTS_MARKDOWN_RE.sub("", text)
     # 去掉 emoji
-    text = re.sub(r"[\U0001f300-\U0001f9ff\u2600-\u26ff\u2700-\u27bf]", "", text)
+    text = _TTS_EMOJI_RE.sub("", text)
     # 合并多余空白和换行
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _TTS_WHITESPACE_RE.sub(" ", text).strip()
     # 截断过长文本（取前500字符，尽量在句号处截断）
     if len(text) > 500:
         cut = text[:500]
@@ -1127,6 +1152,7 @@ class VoiceAssistant:
             from vision import get_vision_manager
             get_vision_manager().stop_if_active()
             get_vision_manager().bind_visual(self.visual)
+            get_vision_manager().set_role(self.current_cfg.get("id", "jarvis"))
         except Exception as e:
             print(f"[Vision] 角色切换联动失败: {e}")
 
@@ -1921,12 +1947,13 @@ class VoiceAssistant:
                         self.last_voice_time = time.time()
                         if not self._suppress_recognition_until_tts_done:
                             print(f"\r✓ 识别: {result}", end="", flush=True)
-                        # 地图/视觉类指令在流式阶段不刷输入框（避免 ASR 回声把话术重复打入），
+                        # 地图/视觉/电脑/编码类指令在流式阶段不刷输入框（避免 ASR 回声把话术重复打入），
                         # 最终判定为真指令时在下方统一显示一次。
                         if (
                             not self._map_like(result)
                             and not self._vision_like(result)
                             and not self._computer_like(result)
+                            and not self._coding_like(result)
                         ):
                             self.visual.show_user_text(result)
 
@@ -2063,6 +2090,14 @@ class VoiceAssistant:
                                 recognition_result = ""
                                 continue
 
+                            # 编码任务确认答复（确认/取消/超时）→ 优先于其他指令处理
+                            if self._handle_coding_confirm(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
                             # 地图指令（定位/缩放/重置）→ 直接驱动 overlay，不进大模型
                             if self._handle_map_command(recognition_result):
                                 if self._map_show_user_text:
@@ -2074,6 +2109,14 @@ class VoiceAssistant:
 
                             # 视觉模式指令（开启/关闭视觉扫描）→ 直接驱动 overlay，不进大模型
                             if self._handle_vision_command(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
+                            # Coding Agent（Codex CLI 编码能力）指令 → 本地执行/确认，不进大模型
+                            if self._handle_coding_command(recognition_result):
                                 self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
                                 recognition_stream = self.recognizer.create_stream()
@@ -2601,10 +2644,16 @@ class VoiceAssistant:
         self.jarvis.on_exit()
         self.visual.clear_texts()
         self.visual.hide_effects()
+        try:
+            from vision import get_vision_manager
+            get_vision_manager().set_object_scan(False)
+        except Exception as e:
+            print(f"[Vision] 退下时关闭扫描失败: {e}")
         self.is_awake = False
         self.continuous_mode = False
         self._verified_speaker_name = None
         self._conv_audio_buffer.clear()
+        self._coding_pending_confirm = None  # 退下时清空待确认编码任务
         play_prebuilt_voice("exit", _random_exit_line())
         while is_tts_playing():
             time.sleep(0.05)
@@ -2708,13 +2757,15 @@ class VoiceAssistant:
         return bool(
             re.search(
                 r"(?:开启|启动|打开|进入|开始|关闭|退出|停止|结束)\s*"
-                r"(?:视觉扫描|视觉模式|视觉|扫描|模式)",
+                r"(?:视觉扫描|视觉模式|视觉|扫描|模式)"
+                r"|扫描(?:一下|这个|那个)?|识别(?:一下|这个|那个)?|这是什么"
+                r"|关闭扫描|停止识别|退出扫描|详细介绍一下|详细介绍",
                 t,
             )
         )
 
     def _handle_vision_command(self, text: str) -> bool:
-        """识别视觉模式指令（开启/关闭视觉扫描）：返回 True 表示已消费，不进大模型。"""
+        """识别视觉模式指令（开启/关闭/扫描/识别/详细介绍）：返回 True 表示已消费。"""
         t = (text or "").strip()
         if not t:
             return False
@@ -2730,22 +2781,39 @@ class VoiceAssistant:
                 t,
             )
         )
+        scan_on = bool(
+            re.search(
+                r"扫描(?:一下|这个|那个)\S*$|识别(?:一下|这个|那个)\S*$|这是什么$", t
+            )
+        )
+        scan_off = bool(re.search(r"关闭扫描|停止识别|退出扫描", t))
+        describe = bool(re.search(r"详细介绍一下|详细介绍|详细说说", t))
         try:
             from vision import get_vision_manager
             mgr = get_vision_manager()
         except Exception as e:
             print(f"[Vision] 模块加载失败: {e}")
             return False
-        if not start and not stop:
+        if not start and not stop and not scan_on and not scan_off and not describe:
             # 视觉模式激活时，裸"关闭/退出/停止"视为关闭视觉（"结束"是系统退出词，不抢）
             if mgr.is_active() and t in ("关闭", "退出", "停止"):
                 stop = True
             else:
                 return False
-        norm = "start" if start else "stop"
+        # 「退出扫描」与通用「退出视觉」重叠：扫描关闭优先（仅停扫描，保留视觉模式）
+        if scan_off:
+            stop = False
+        norm = (
+            "scan_on" if scan_on
+            else "scan_off" if scan_off
+            else "describe" if describe
+            else "start" if start
+            else "stop"
+        )
         now = time.time()
         _diag.info(
-            "[Vision] cmd=%r start=%s stop=%s active=%s", t, start, stop, mgr.is_active()
+            "[Vision] cmd=%r norm=%s start=%s stop=%s scan_on=%s scan_off=%s describe=%s active=%s",
+            t, norm, start, stop, scan_on, scan_off, describe, mgr.is_active(),
         )
         # 去重：同一指令 15 秒内重复（ASR 回声/流式重发）→ 忽略但仍消费
         if norm == self._last_vision_norm and now - self._last_vision_ts < self._VISION_DEDUP_TTL:
@@ -2753,6 +2821,30 @@ class VoiceAssistant:
             return True
         self._last_vision_norm = norm
         self._last_vision_ts = now
+
+        # 物体扫描 / 详细描述（Spatial Vision）
+        if describe:
+            return self._handle_vision_describe(mgr)
+        if scan_off:
+            mgr.set_object_scan(False)
+            self.visual.send("vision:scan off", quiet=True)
+            msg = "Object scan stopped." if self._current_lang() != "zh" else "已停止识别。"
+            self.visual.show_ai_text("OBJECT SCAN OFF")
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+            print("[Vision] 物体扫描关闭指令")
+            return True
+        if scan_on:
+            mgr.on_object = self._on_vision_object
+            if not mgr.is_active():
+                mgr.start()
+            mgr.set_object_scan(True)
+            self.visual.send("vision:scan on", quiet=True)
+            msg = "Scanning. Show me the object, sir." if self._current_lang() != "zh" else "开始识别，请把物体放到镜头前。"
+            self.visual.show_ai_text("OBJECT SCAN ACTIVE")
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+            print("[Vision] 物体扫描开启指令")
+            return True
+
         if start:
             if mgr.is_active():
                 print("[Vision] 已在视觉模式，忽略重复开启")
@@ -2776,6 +2868,48 @@ class VoiceAssistant:
         self.visual.show_ai_text(hud)
         threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
         return True
+
+    def _handle_vision_describe(self, mgr) -> bool:
+        """“详细介绍一下”：用当前帧调 vision-agent 描述（异步，不阻塞主循环）。"""
+        zh = self._current_lang() == "zh"
+        if not mgr.is_active():
+            msg = "Vision mode is not active. Please start it first." if not zh else "请先开启视觉模式。"
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+            return True
+        frame = mgr.last_frame()
+        if not frame:
+            msg = "No camera frame available yet." if not zh else "暂时没有画面，请稍后再试。"
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+            return True
+
+        def _run():
+            try:
+                from assistants.vision_agent import get_vision_agent
+
+                text = get_vision_agent().describe(frame, mgr.role)
+                msg = text if text else ("无法获取更多细节。" if zh else "I couldn't extract more details.")
+                self.visual.show_ai_text(msg)
+                threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+            except Exception as e:
+                print(f"[Vision] 详细描述失败: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return True
+
+    def _on_vision_object(self, result: dict):
+        """物体识别结果 → 角色语言口播（识别线程调用，另起线程播报）。"""
+        try:
+            zh = self._current_lang() == "zh"
+            label = result.get("label") or "Unknown"
+            conf = (result.get("confidence") or 0.0) * 100
+            if zh:
+                msg = f"识别到：{label}，置信度 {int(conf)}%。"
+            else:
+                msg = f"Object identified: {label}. Confidence {int(conf)} percent."
+            self.visual.show_ai_text(msg)
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        except Exception as e:
+            print(f"[Vision] 识别口播失败: {e}")
 
     # ── 电脑控制（Computer Control）指令 ────────────────────
     # 本地能力拦截（与地图/视觉同级）：打开/关闭/切换应用、输入文字、按键、
@@ -2886,6 +3020,185 @@ class VoiceAssistant:
             threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
         except Exception as e:
             print(f"[Computer] 确认口播失败: {e}")
+
+    # ── Coding Agent（Codex CLI 编码能力）指令 ────────────────
+    # 本地拦截（与地图/视觉/电脑同级）：分析/审查/测试/修改/git 任务，不进大模型；
+    # modify/commit/push 需语音确认（60s 超时自动拒绝）。确认口播跟随角色语言
+    # （贾维斯英文 / 林妹妹中文）。防 ASR 回声/流式重发的去重窗口同其他模块。
+    _CODING_DEDUP_TTL = 15.0
+    _last_coding_norm = ""
+    _last_coding_ts = 0.0
+    _coding_pending_confirm = None  # {confirm_id, mode, project, task, deadline}
+    # 编码指令预判：动词 + 编码域目标词（避免把普通聊天误判成编码任务）
+    _CODING_LIKE_RE = re.compile(
+        r"^(?:(?:请|帮我|麻烦|给我|帮)?"
+        r"(?:分析|看看|审查|评审|检查|优化|修改|实现|增加|添加|重构|修复|改造|运行|跑|执行)"
+        r"(?:一下|一遍|下)?\s*"
+        r"(?:这个|一下|当前|我的)?\s*"
+        r"[\w\-_.]{0,16}\s*"
+        r"(?:项目|代码|仓库|工程|测试|代码库|功能|页面|接口|配置|文件|bug|昨天|提交)"
+        r"\s*.{0,40}"
+        r"|(?:git\s+(?:status|log|diff|commit|push)|提交记录|项目状态|工作区状态|查看状态|"
+        r"提交(?:一下)?(?:代码|改动)?|推送(?:代码|一下)?)"
+        r"|(?:切换到|切到|切到一下)\s*[\w\-_.]{1,24}\s*(?:项目|仓库|工程)"
+        r"|(?:please |plz )?(?:analyze|review|optimize|improve|implement|add|fix|refactor|"
+        r"build|run tests?|describe this project|what does this project)"
+        r"\s*.{0,40})$",
+        re.I,
+    )
+    _CODING_YES_RE = re.compile(
+        r"^(?:确认|确认执行|同意|同意执行|可以|可以执行|执行|批准|好的|行|没问题|"
+        r"yes|ok|okay|go ahead|approve|confirm|do it)$",
+        re.I,
+    )
+    _CODING_NO_RE = re.compile(
+        r"^(?:取消|取消执行|拒绝|不要|不要执行|算了|不用了|不了|停下|"
+        r"no|nope|cancel|deny|stop|abort)$",
+        re.I,
+    )
+
+    def _coding_like(self, t: str) -> bool:
+        """流式识别阶段的编码指令预判（避免回声把文字刷进输入框）。"""
+        return bool(self._CODING_LIKE_RE.match((t or "").strip()))
+
+    def _handle_coding_command(self, text: str) -> bool:
+        """识别编码指令：返回 True 表示已消费，不进大模型。"""
+        t = (text or "").strip()
+        if not t or not self._coding_like(t):
+            return False
+        now = time.time()
+        norm = re.sub(r"\s+", "", t).lower()
+        if (
+            norm == self._last_coding_norm
+            and now - self._last_coding_ts < self._CODING_DEDUP_TTL
+        ):
+            print(f"[Coding] 重复指令忽略: {t}")
+            return True
+        try:
+            from coding_agent import get_coding_agent
+
+            agent = get_coding_agent()
+            res = agent.handle(t)
+        except Exception as e:
+            print(f"[Coding] 模块加载失败: {e}")
+            return False
+        if not res:
+            return False
+        self._last_coding_norm = norm
+        self._last_coding_ts = now
+        if isinstance(res, dict):
+            if res.get("status") == "waiting_confirmation":
+                pending = agent.pending_confirmations()
+                if pending:
+                    last = pending[-1]
+                    self._coding_pending_confirm = {
+                        "confirm_id": last["confirm_id"],
+                        "mode": last["mode"],
+                        "project": last["project"],
+                        "task": last["task"],
+                        "deadline": time.time() + last["remaining"],
+                    }
+                    self._ask_coding_confirm()
+            else:
+                # 黑名单拒绝 / 项目切换等立即结果 → 直接口播
+                self._coding_speak(res)
+            return True
+        res.add_done_callback(self._coding_done_cb)
+        return True
+
+    def _handle_coding_confirm(self, text: str) -> bool:
+        """处理待确认编码任务的语音答复：确认/取消；超时自动拒绝。"""
+        p = self._coding_pending_confirm
+        if not p:
+            return False
+        t = (text or "").strip()
+        if not t:
+            return False
+        expired = (p["deadline"] - time.time()) <= 0
+        yes = bool(self._CODING_YES_RE.match(t))
+        no = bool(self._CODING_NO_RE.match(t))
+        if not yes and not no:
+            if expired:
+                # 超时静默清理，不打断当前话术
+                self._coding_pending_confirm = None
+                try:
+                    from coding_agent import get_coding_agent
+
+                    get_coding_agent().confirm(p["confirm_id"], False)
+                except Exception as e:
+                    print(f"[Coding] 超时清理失败: {e}")
+            return False
+        self._coding_pending_confirm = None
+        try:
+            from coding_agent import get_coding_agent
+
+            res = get_coding_agent().confirm(p["confirm_id"], yes)
+            if hasattr(res, "add_done_callback"):
+                res.add_done_callback(self._coding_done_cb)
+        except Exception as e:
+            print(f"[Coding] 确认回调失败: {e}")
+        self._coding_speak_confirm(expired=expired, approved=yes)
+        return True
+
+    def _ask_coding_confirm(self):
+        """编码任务需确认：口播确认请求（角色语言）+ overlay 文本。"""
+        zh = self._current_lang() == "zh"
+        if zh:
+            msg = "这个任务需要修改代码，是否确认执行？"
+        else:
+            msg = "This task will modify code. Shall I proceed, sir?"
+        self.visual.show_ai_text(msg)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+
+    def _coding_speak_confirm(self, expired: bool = False, approved: bool = True):
+        """确认答复口播（角色语言）。"""
+        zh = self._current_lang() == "zh"
+        if expired:
+            msg = "Confirmation timed out. Task cancelled." if not zh else "确认超时，任务已取消。"
+        elif approved:
+            msg = "Understood. Running the task now, sir." if not zh else "好的，马上执行。"
+        else:
+            msg = "Task cancelled." if not zh else "已取消。"
+        self.visual.show_ai_text(msg)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+
+    def _coding_done_cb(self, f):
+        """编码任务异步完成 → 口播结果（角色语言）。"""
+        try:
+            if not f.cancelled():
+                self._coding_speak(f.result())
+        except Exception as e:
+            print(f"[Coding] 结果回调失败: {e}")
+
+    def _coding_speak(self, result: dict):
+        """编码任务结果口播（角色语言）+ overlay 文本。"""
+        try:
+            zh = self._current_lang() == "zh"
+            status = result.get("status", "")
+            summary = (result.get("summary", "") or "").strip()
+            if status == "success":
+                if summary:
+                    msg = summary if zh else f"Done. {summary}"
+                else:
+                    msg = "任务已完成。" if zh else "Done."
+            elif status == "denied":
+                msg = summary if zh else "Task denied."
+            elif status == "cancelled":
+                msg = "Task cancelled." if not zh else "任务已取消。"
+            elif status == "failed":
+                msg = f"Failed. {summary}" if not zh else f"任务失败：{summary}"
+            else:
+                msg = summary or ("Done." if not zh else "已完成。")
+            if len(msg) > 200:
+                msg = msg[:200]
+            overlay_msg = msg
+            try:
+                self.visual.show_ai_text(overlay_msg)
+            except Exception as e:
+                print(f"[Coding] overlay 文本失败: {e}")
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        except Exception as e:
+            print(f"[Coding] 结果口播失败: {e}")
 
     def _map_clean_city(self, candidate: str) -> str:
         """从 ASR 提取的地点名中归一化出真实地名。

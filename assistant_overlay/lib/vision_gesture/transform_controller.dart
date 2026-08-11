@@ -9,9 +9,9 @@ import 'transform_state.dart';
 class TransformController extends ValueNotifier<TransformState> {
   TransformController() : super(TransformState.identity);
 
-  static const double minScale = 0.8;
-  static const double maxScale = 3.0;
-  static const double maxPos = 1.0;
+  static const double minScale = 0.6;
+  static const double maxScale = 4.0;
+  static const double maxPos = 1.2;
 
   void apply({
     double dScale = 1.0,

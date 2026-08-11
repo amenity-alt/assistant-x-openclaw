@@ -67,6 +67,10 @@ class VisionHudController extends ChangeNotifier {
   List<VisionHand> hands = const [];
   String error = '';
   GesturePhase gesturePhase = GesturePhase.idle;
+  /// 物体识别结果（vision:object <json>）：label/category/confidence/info/bbox
+  Map<String, dynamic>? objectResult;
+  /// 物体扫描模式是否激活（vision:scan on/off）
+  bool objectScanning = false;
 
   /// 手势 → 变换链路（跨 Vision 会话常驻，退出视觉后保持模型姿态）
   late final TransformController transform = TransformController();
@@ -95,9 +99,29 @@ class VisionHudController extends ChangeNotifier {
     _releaseFrame();
     hands = const [];
     error = '';
+    objectResult = null;
+    objectScanning = false;
     gesture.resetTracking();
     gesturePhase = GesturePhase.idle;
     notifyListeners();
+  }
+
+  void setObjectScan(bool on) {
+    if (objectScanning == on) return;
+    objectScanning = on;
+    if (!on) objectResult = null;
+    notifyListeners();
+  }
+
+  void setObject(String jsonStr) {
+    try {
+      final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+      objectResult = data;
+      if (mode == VisionMode.analyzing || mode == VisionMode.scanning) {
+        mode = VisionMode.completed;
+      }
+      notifyListeners();
+    } catch (_) {}
   }
 
   void setStatus(String raw) {
@@ -298,7 +322,13 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
       builder: (context, child) {
         final c = widget.controller;
         final screen = MediaQuery.of(context).size;
-        final ringSize = screen.height * 0.42;
+        // Spatial Vision：中央全息空间占屏幕主要区域（宽 60% × 高 55%）
+        final hologramSize = Size(
+          screen.width * 0.60,
+          screen.height * 0.55,
+        );
+        final ringSize =
+            math.max(hologramSize.width, hologramSize.height) * 1.12;
         return FadeTransition(
           opacity: _fade,
           child: RepaintBoundary(
@@ -324,11 +354,13 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                       offstage: !c.showHud,
                       child: Center(
                         child: SizedBox(
-                          width: ringSize * 0.8,
-                          height: ringSize * 0.8,
+                          width: hologramSize.width,
+                          height: hologramSize.height,
                           child: ThreeJsHologramView(
                             transform: c.transform,
                             active: c.showHud,
+                            size: hologramSize,
+                            glbPath: kHologramGlbPath,
                           ),
                         ),
                       ),
@@ -367,6 +399,7 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
                 _buildTopBar(c, screen),
                 _buildLeftPanel(c, screen),
                 _buildRightPanel(c, screen),
+                _buildObjectPanel(c, screen),
                 _buildStatusLine(c, screen),
                 _buildBottomProgress(c, screen),
                 ],
@@ -499,6 +532,69 @@ class _VisionHudOverlayState extends State<VisionHudOverlay>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // ── 物体识别结果面板（右侧，VISION DATA 下方）────────────
+  Widget _buildObjectPanel(VisionHudController c, Size screen) {
+    if (!c.objectScanning && c.objectResult == null) {
+      return const SizedBox.shrink();
+    }
+    final r = c.objectResult;
+    final label = r?['label']?.toString() ?? '';
+    final category = r?['category']?.toString() ?? '';
+    final conf = (r?['confidence'] as num?)?.toDouble() ?? 0.0;
+    final info = r?['info']?.toString() ?? '';
+    return Positioned(
+      right: 60,
+      top: screen.height * 0.16 + screen.height * 0.36,
+      width: screen.width / 7,
+      child: HudTerminalShell(
+        title: 'OBJECT FOUND',
+        width: screen.width / 7,
+        maxHeight: screen.height * 0.22,
+        child: AnimatedBuilder(
+          animation: _sweep,
+          builder: (context, child) {
+            if (r == null) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'SCANNING…',
+                  style: TextStyle(
+                    color: Color(0xFFFFB347),
+                    fontSize: 11,
+                    letterSpacing: 2,
+                  ),
+                ),
+              );
+            }
+            final pct = (conf * 100).round();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _metric('OBJECT', label.isEmpty ? 'UNKNOWN' : label, conf >= 0.3),
+                _metric('CATEGORY', category.isEmpty ? '-' : category, true),
+                _metric('CONFIDENCE', '$pct%', conf >= 0.5),
+                if (info.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    info,
+                    maxLines: 4,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF9FB4C8),
+                      fontSize: 10,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -652,7 +748,17 @@ String _gestureText(VisionHudController c) {
       return 'GESTURE MOVE · TRACKING';
     case GesturePhase.pinchReady:
       return 'PINCH READY';
-    default:
+    case GesturePhase.hover:
+      return 'HOVER · GESTURE READY';
+    case GesturePhase.grab:
+      return 'GRAB · PINCH LOCKED';
+    case GesturePhase.transform:
+      return 'TRANSFORM · SCALE x${c.transform.value.scale.toStringAsFixed(2)}';
+    case GesturePhase.release:
+      return 'RELEASE · RESETTING';
+    case GesturePhase.idle:
+      return 'TRACKING IDLE';
+    case GesturePhase.handDetected:
       return 'TRACKING ACTIVE · GESTURE READY';
   }
 }

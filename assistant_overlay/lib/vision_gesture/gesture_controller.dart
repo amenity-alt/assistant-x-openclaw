@@ -4,12 +4,13 @@ import 'gesture_recognizer.dart';
 import 'landmark_filter.dart';
 import 'transform_controller.dart';
 
-/// 手势状态机：IDLE → HAND_DETECTED → PINCH_READY → ZOOMING / ROTATING / MOVING。
+/// 手势状态机：IDLE → HAND_DETECTED → HOVER → GRAB → TRANSFORM → RELEASE。
 ///
 /// 仲裁规则：
-/// - 捏合（拇指-食指距离/掌宽 < 阈值，带滞回）→ ZOOMING，优先于旋转；
-/// - 手掌滚转/俯仰变化 → ROTATING；
-/// - 掌心平移 → MOVING（可与旋转并存，多自由度同时生效）。
+/// - HOVER：手掌稳定在画面内（无动作持续数帧）才进入可操作状态，防误触；
+/// - GRAB：捏合进入（拇指-食指并拢，带滞回）→ 下一帧进入 TRANSFORM；
+/// - TRANSFORM：捏合缩放 / 手掌滚转俯仰旋转 / 掌心平移，可多自由度并存；
+/// - RELEASE：捏合退出或手丢失时的过渡帧。
 enum GesturePhase {
   idle,
   handDetected,
@@ -17,6 +18,10 @@ enum GesturePhase {
   zooming,
   rotating,
   moving,
+  hover,
+  grab,
+  transform,
+  release,
 }
 
 /// 手势识别控制器：消费平滑后的手部数据，产出增量并驱动 [TransformController]。
@@ -48,6 +53,11 @@ class GestureController {
   double _prevPinch = 1;
   bool _hasPrev = false;
   bool _pinching = false;
+  int _hoverFrames = 0;
+  bool _wasTracking = false;
+
+  /// 进入 HOVER 所需的最小稳定帧数（~10fps 输入，3 帧 ≈ 0.3s）。
+  static const int hoverFramesRequired = 3;
 
   /// 处理一帧手部数据（多手时取置信度最高者）。
   GesturePhase process(List<GestureHand> hands) {
@@ -59,28 +69,45 @@ class GestureController {
       }
     }
     if (best == null) {
+      final was = _wasTracking;
       resetTracking();
-      return phase = GesturePhase.idle;
+      _wasTracking = false;
+      return phase = was ? GesturePhase.release : GesturePhase.idle;
     }
+    _wasTracking = true;
 
     final sample = _recognizer.sample(_filter.filter(best.landmarks));
     if (sample == null) {
+      final was = _wasTracking;
       resetTracking();
-      return phase = GesturePhase.idle;
+      _wasTracking = false;
+      return phase = was ? GesturePhase.release : GesturePhase.idle;
     }
 
     if (!_hasPrev) {
       _remember(sample);
       _hasPrev = true;
-      return phase =
-          _pinching ? GesturePhase.zooming : GesturePhase.handDetected;
+      _hoverFrames = 0;
+      return phase = GesturePhase.handDetected;
     }
 
-    // 捏合滞回
+    // 捏合滞回 + 进入/退出边沿检测
+    final wasPinching = _pinching;
     if (!_pinching && sample.pinchRatio < pinchEnter) {
       _pinching = true;
     } else if (_pinching && sample.pinchRatio > pinchExit) {
       _pinching = false;
+    }
+    final pinchEntered = !wasPinching && _pinching;
+    final pinchExited = wasPinching && !_pinching;
+
+    if (pinchEntered) {
+      _remember(sample);
+      return phase = GesturePhase.grab;
+    }
+    if (pinchExited) {
+      _remember(sample);
+      return phase = GesturePhase.release;
     }
 
     double dScale = 1.0;
@@ -95,7 +122,6 @@ class GestureController {
         dScale = (1 + (_prevPinch - sample.pinchRatio) * scaleSens)
             .clamp(1 - maxScaleDelta, 1 + maxScaleDelta);
       }
-      phase = GesturePhase.zooming;
     } else {
       final dRoll = _angleDelta(sample.roll, _prevRoll);
       final dPitch = sample.pitch - _prevPitch;
@@ -105,25 +131,19 @@ class GestureController {
       if (dPitch.abs() > rotDeadband) {
         dRotX = (-dPitch * pitchSens).clamp(-maxRotDelta, maxRotDelta);
       }
-      phase = (dRotY != 0 || dRotX != 0)
-          ? GesturePhase.rotating
-          : GesturePhase.handDetected;
     }
 
     final dX = sample.palmX - _prevPalmX;
     final dY = sample.palmY - _prevPalmY;
     if (dX.abs() > moveDeadband) dPosX = dX * moveSens;
     if (dY.abs() > moveDeadband) dPosY = dY * moveSens;
-    // 旋转优先于移动：位移照常应用，标签按主手势展示
-    if (phase == GesturePhase.handDetected && (dPosX != 0 || dPosY != 0)) {
-      phase = GesturePhase.moving;
-    }
 
     if (dScale != 1.0 ||
         dRotX != 0 ||
         dRotY != 0 ||
         dPosX != 0 ||
         dPosY != 0) {
+      _hoverFrames = 0;
       transform.apply(
         dScale: dScale,
         dRotX: dRotX,
@@ -131,10 +151,16 @@ class GestureController {
         dPosX: dPosX,
         dPosY: dPosY,
       );
+      _remember(sample);
+      return phase = GesturePhase.transform;
     }
 
+    // 稳定无动作 → 帧数达标后进入 HOVER（防误触）
+    _hoverFrames++;
     _remember(sample);
-    return phase;
+    return phase = _hoverFrames >= hoverFramesRequired
+        ? GesturePhase.hover
+        : GesturePhase.handDetected;
   }
 
   void _remember(GestureSample s) {
@@ -150,6 +176,7 @@ class GestureController {
     _filter.reset();
     _hasPrev = false;
     _pinching = false;
+    _hoverFrames = 0;
   }
 
   static double _angleDelta(double a, double b) {

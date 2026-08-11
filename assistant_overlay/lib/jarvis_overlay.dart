@@ -698,6 +698,12 @@ class JarvisAgentVisual implements AgentVisual {
       _visionController.setFrame(command.substring('vision:frame '.length));
     } else if (command.startsWith('vision:hand ')) {
       _visionController.setHands(command.substring('vision:hand '.length));
+    } else if (command.startsWith('vision:object ')) {
+      _visionController.setObject(command.substring('vision:object '.length));
+    } else if (command.startsWith('vision:scan ')) {
+      _visionController.setObjectScan(
+        command.substring('vision:scan '.length).trim().toLowerCase() == 'on',
+      );
     } else if (command.startsWith('user:')) {
       final text = command.substring(5);
       // 用户讲话，从当前值平滑变到 1.3（只触发一次）
