@@ -66,6 +66,16 @@ class TaskManager:
             self._last_future = future
         return future
 
+    def submit_approved(self, task: CodingTask):
+        """已由外部（如 Mission Control）确认的任务直接入队执行，跳过 guard。
+
+        仅供上层编排器在完成自己的确认/黑名单检查后调用；普通入口仍走 submit()。
+        """
+        future = self._pool.submit(self._execute, task)
+        with self._lock:
+            self._last_future = future
+        return future
+
     def confirm_result(self, confirm_id: str, approved: bool):
         """确认回调（Phase 2 语音接入）。
 

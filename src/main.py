@@ -2098,6 +2098,14 @@ class VoiceAssistant:
                                 start_audio_stream()
                                 continue
 
+                            # Mission Control 确认/控制（任务确认/取消/暂停/继续/跳过/状态）
+                            if self._handle_mission_control(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
                             # 地图指令（定位/缩放/重置）→ 直接驱动 overlay，不进大模型
                             if self._handle_map_command(recognition_result):
                                 if self._map_show_user_text:
@@ -2125,6 +2133,14 @@ class VoiceAssistant:
 
                             # 电脑控制指令（打开/输入/点击/截图等）→ 本地能力执行，不进大模型
                             if self._handle_computer_command(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
+                            # Mission Control 目标指令（任务/目标/规划）→ 规划 + 等待确认
+                            if self._handle_mission_command(recognition_result):
                                 self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
                                 recognition_stream = self.recognizer.create_stream()
@@ -2654,6 +2670,7 @@ class VoiceAssistant:
         self._verified_speaker_name = None
         self._conv_audio_buffer.clear()
         self._coding_pending_confirm = None  # 退下时清空待确认编码任务
+        self._mission_step_pending = None  # 退下时清空待确认任务步骤
         play_prebuilt_voice("exit", _random_exit_line())
         while is_tts_playing():
             time.sleep(0.05)
@@ -3057,6 +3074,45 @@ class VoiceAssistant:
         re.I,
     )
 
+    # ── Mission Control（任务编排）──────────────────────────
+    _MISSION_DEDUP_TTL = 15.0
+    _last_mission_norm = ""
+    _last_mission_ts = 0.0
+    _mission_step_pending = None   # 当前等待确认的步骤 id
+    _mission_step_mission = None   # 当前等待确认步骤所属 mission id
+    _mission_bound = False         # 回调是否已绑定
+    _MISSION_LIKE_RE = re.compile(
+        r"(?:创建|开始|安排|规划|制定|执行|做|建|设置)(?:一下)?\s*(?:一个)?\s*"
+        r"(?:任务|目标|计划)"
+        r"|(?:规划|计划|安排|制定|执行)(?:一下)?\s*[::：]"
+        r"|(?:任务|目标|计划)\s*[::：]"
+        r"|帮我(?:完成|处理|搞定|做|实现|执行).{2,80}(?:并|然后|再|以及|且)"
+        r"|(?:create|start|plan|begin|execute)\s+(?:a\s+)?(?:mission|task|plan)"
+        r"|(?:mission|task|plan|goal)\s*[:：]",
+        re.I,
+    )
+    _MISSION_YES_RE = re.compile(
+        r"^(?:确认|确认执行|确认任务|同意|同意执行|可以|可以执行|执行|批准|好的|行|没问题|"
+        r"开始|开始吧|开始执行|执行吧|ok|okay|go ahead|approve|confirm|do it|sure|yes)"
+        r"(?:任务|吧|了|的)?$",
+        re.I,
+    )
+    _MISSION_NO_RE = re.compile(
+        r"^(?:取消|取消任务|拒绝|不要|不要执行|算了|不用了|不了|停下|停止|"
+        r"no|nope|cancel|deny|stop|abort)(?:任务|吧|了|的)?$",
+        re.I,
+    )
+    _MISSION_PAUSE_RE = re.compile(r"^(?:暂停|先暂停|pause)(?:任务|一下|吧|了)?$", re.I)
+    _MISSION_RESUME_RE = re.compile(r"^(?:继续|继续执行|接着|resume)(?:任务|吧|了|的)?$", re.I)
+    _MISSION_SKIP_RE = re.compile(
+        r"^(?:跳过|跳过这一步|跳过这个步骤|跳过下一步|skip)(?:吧|了)?$", re.I
+    )
+    _MISSION_STATUS_RE = re.compile(
+        r"^(?:任务进度|任务状态|任务怎么样|进度|汇报进度|mission status|mission progress)"
+        r"(?:如何|怎样|怎么样|如何了|了)?$",
+        re.I,
+    )
+
     def _coding_like(self, t: str) -> bool:
         """流式识别阶段的编码指令预判（避免回声把文字刷进输入框）。"""
         return bool(self._CODING_LIKE_RE.match((t or "").strip()))
@@ -3199,6 +3255,261 @@ class VoiceAssistant:
             threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
         except Exception as e:
             print(f"[Coding] 结果口播失败: {e}")
+
+    # ── Mission Control 语音接入 ──────────────────────────
+    def _mission_like(self, t: str) -> bool:
+        """流式识别阶段的任务指令预判（避免回声把文字刷进输入框）。"""
+        return bool(self._MISSION_LIKE_RE.search((t or "").strip()))
+
+    def _mission_goal(self, t: str) -> str:
+        """从触发语句中剥离任务壳子，提取目标文本。"""
+        g = (t or "").strip()
+        for pat in (
+            r"^(?:请|麻烦|帮我|可以)?\s*(?:创建|开始|安排|规划|制定|执行|做|建|设置)"
+            r"(?:一下)?\s*(?:一个)?\s*(?:任务|目标|计划)\s*[::：]?\s*",
+            r"^(?:请|麻烦|帮我|可以)?\s*(?:规划|计划|安排|制定|执行)(?:一下)?\s*[::：]?\s*",
+            r"^(?:create|start|plan|begin|execute)\s+(?:a\s+)?"
+            r"(?:mission|task|plan)\s*[:：]?\s*",
+            r"^(?:mission|task|plan|goal)\s*[:：]\s*",
+            r"^帮我(?:完成|处理|搞定|做|实现|执行)\s*",
+        ):
+            g = re.sub(pat, "", g, flags=re.I)
+        g = g.strip()
+        return g[:300] or (t or "").strip()[:300]
+
+    def _step_label(self, step) -> str:
+        """步骤的人类可读标签（口播/HUD 用）。"""
+        if isinstance(step, dict):
+            agent, action = step.get("agent", ""), step.get("action", "")
+        else:
+            agent, action = step.agent, step.action
+        if agent == "coding":
+            return {
+                "analyze": "Analyze project", "review": "Code review",
+                "test": "Run tests", "modify": "Modify code",
+                "git": "Git operation",
+            }.get(action, action)
+        if agent == "computer":
+            return {
+                "open_app": "Open app", "close_app": "Close app",
+                "switch_app": "Switch app", "type_text": "Type text",
+                "press_keys": "Press keys", "click_element": "Click element",
+                "take_screenshot": "Take screenshot",
+                "get_screen_state": "Describe screen", "list_apps": "List apps",
+            }.get(action, action)
+        if agent == "llm":
+            return "Text task"
+        return f"{agent}.{action}"
+
+    def _bind_mission_callbacks(self, agent):
+        if self._mission_bound:
+            return
+        agent.on_plan = self._mission_on_plan
+        agent.on_confirm_request = self._mission_on_confirm_request
+        agent.on_step_done = self._mission_on_step_done
+        agent.on_mission_done = self._mission_on_mission_done
+        self._mission_bound = True
+
+    def _mission_speak(self, msg: str, hud: str = None):
+        """角色语言口播 + overlay 文本（防回声走 _map_speak）。"""
+        self.visual.show_ai_text(hud if hud else msg)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+
+    def _handle_mission_command(self, text: str) -> bool:
+        """识别任务目标指令：规划 → 展示计划 → 等待确认。返回 True 表示已消费。"""
+        t = (text or "").strip()
+        if not t or not self._mission_like(t):
+            return False
+        now = time.time()
+        norm = re.sub(r"\s+", "", t).lower()
+        if (
+            norm == self._last_mission_norm
+            and now - self._last_mission_ts < self._MISSION_DEDUP_TTL
+        ):
+            print(f"[Mission] 重复指令忽略: {t}")
+            return True
+        try:
+            from mission_control import get_mission_agent
+
+            agent = get_mission_agent()
+            self._bind_mission_callbacks(agent)
+            goal = self._mission_goal(t)
+            role = self.current_cfg.get("id", "jarvis") if self.current_cfg else "jarvis"
+            res = agent.plan_and_request(goal, role)
+        except Exception as e:
+            print(f"[Mission] 模块加载失败: {e}")
+            return False
+        self._last_mission_norm = norm
+        self._last_mission_ts = now
+        if not res.get("ok"):
+            msg = res.get("message") or "无法规划该目标"
+            zh = self._current_lang() == "zh"
+            self._mission_speak(
+                msg if not zh else "抱歉，我无法把这个目标拆解成可执行步骤。",
+                hud="MISSION PLAN FAILED",
+            )
+        return True
+
+    def _handle_mission_control(self, text: str) -> bool:
+        """处理任务确认/控制：确认、取消、暂停、继续、跳过、状态查询。"""
+        t = (text or "").strip()
+        if not t:
+            return False
+        try:
+            from mission_control import get_mission_agent
+
+            agent = get_mission_agent()
+        except Exception:
+            return False
+        self._bind_mission_callbacks(agent)
+        st = agent.status()
+        running = st.get("running")
+        pending = st.get("pending_confirmation")
+        yes = bool(self._MISSION_YES_RE.match(t))
+        no = bool(self._MISSION_NO_RE.match(t))
+        zh = self._current_lang() == "zh"
+        # 步骤级确认优先（Mission 执行中某步请求确认）
+        if self._mission_step_pending and (yes or no):
+            ok = agent.confirm_step(self._mission_step_pending, yes)
+            self._mission_step_pending = None
+            if ok:
+                self._mission_speak(
+                    "Understood. Continuing, sir." if not zh else "好的，继续执行。"
+                )
+            return True
+        # Mission 级确认
+        if pending and (yes or no):
+            agent.confirm(yes)
+            self._mission_speak(
+                "Understood. Starting the mission now, sir."
+                if yes and not zh
+                else "好的，开始执行任务。" if yes else "任务已取消。"
+            )
+            return True
+        if not running:
+            return False
+        if self._MISSION_PAUSE_RE.match(t):
+            self._mission_speak_control(agent.pause(running), zh)
+            return True
+        if self._MISSION_RESUME_RE.match(t):
+            self._mission_speak_control(agent.resume(running), zh)
+            return True
+        if self._MISSION_SKIP_RE.match(t):
+            m = st.get("mission") or {}
+            cur = next(
+                (s for s in m.get("steps", []) if s.get("status") == "running"), None
+            )
+            if cur:
+                agent.skip_step(running, cur["id"])
+                self._mission_speak(
+                    "Step will be skipped, sir." if not zh else "好的，将跳过这一步。"
+                )
+            return True
+        if self._MISSION_STATUS_RE.match(t):
+            self._mission_report_status(agent, st)
+            return True
+        return False
+
+    def _mission_speak_control(self, res: dict, zh: bool):
+        msg = res.get("message") or ("操作完成" if zh else "Done.")
+        self._mission_speak(msg)
+
+    def _mission_report_status(self, agent, st: dict):
+        zh = self._current_lang() == "zh"
+        running = st.get("running")
+        if not running:
+            self._mission_speak(
+                "No mission is running, sir." if not zh else "当前没有正在执行的任务。"
+            )
+            return
+        m = st.get("mission") or {}
+        steps = m.get("steps", [])
+        done = sum(1 for s in steps if s.get("status") == "succeeded")
+        cur = next((s for s in steps if s.get("status") == "running"), None)
+        if zh:
+            msg = f"任务进行中，已完成 {done}/{len(steps)} 步。"
+            if cur:
+                msg += f"当前正在执行：{self._step_label(cur)}。"
+        else:
+            msg = f"Mission running, {done}/{len(steps)} steps completed."
+            if cur:
+                msg += f" Now executing: {self._step_label(cur)}."
+        self._mission_speak(msg)
+
+    # ── Mission 回调（executor 线程 → 口播）────────────────
+    def _mission_on_plan(self, mission):
+        """计划生成：口播计划摘要 + 请求确认。"""
+        zh = self._current_lang() == "zh"
+        steps = mission.steps
+        n = len(steps)
+        labels = [self._step_label(s) for s in steps]
+        if zh:
+            head = f"计划共 {n} 步："
+            body = "；".join(f"{i + 1}. {lb}" for i, lb in enumerate(labels))
+            msg = head + body + "。是否开始执行？"
+        else:
+            head = f"Plan ready, sir. {n} step{'s' if n != 1 else ''}: "
+            body = " ".join(f"{i + 1}. {lb}" for i, lb in enumerate(labels))
+            msg = head + body + " Proceed?"
+        self._mission_speak(msg, hud="MISSION PLAN")
+
+    def _mission_on_confirm_request(self, mission_id, step):
+        """步骤确认请求：记录 pending 并口播。"""
+        zh = self._current_lang() == "zh"
+        self._mission_step_pending = step["id"]
+        self._mission_step_mission = mission_id
+        idx = step.get("index", 0) + 1
+        if zh:
+            msg = f"第 {idx} 步需要你确认：{self._step_label(step)}。是否继续？"
+        else:
+            msg = (
+                f"Step {idx} needs your approval: {self._step_label(step)}. "
+                "Shall I proceed, sir?"
+            )
+        self._mission_speak(msg)
+
+    def _mission_on_step_done(self, mission_id, step):
+        """步骤完成/失败/跳过口播（成功与失败播报，跳过安静）。"""
+        status = step.get("status")
+        if status not in ("succeeded", "failed", "skipped"):
+            return
+        zh = self._current_lang() == "zh"
+        idx = step.get("index", 0) + 1
+        label = self._step_label(step)
+        if status == "succeeded":
+            msg = f"Step {idx} done: {label}." if not zh else f"第 {idx} 步完成：{label}。"
+        elif status == "failed":
+            reason = step.get("error") or (step.get("result") or {}).get("summary", "")
+            msg = (
+                f"Step {idx} failed: {reason or label}."
+                if not zh
+                else f"第 {idx} 步失败：{reason or label}。"
+            )
+        else:
+            msg = f"Step {idx} skipped." if not zh else f"第 {idx} 步已跳过。"
+        self._mission_speak(msg)
+
+    def _mission_on_mission_done(self, mission_id, mission):
+        """任务完成/失败/取消汇报。"""
+        zh = self._current_lang() == "zh"
+        status = mission.get("status")
+        if status == "completed":
+            msg = (
+                f"Mission complete, sir. {mission.get('summary', '')}."
+                if not zh
+                else f"任务完成。{mission.get('summary', '')}。"
+            )
+        elif status == "failed":
+            msg = (
+                f"Mission failed: {mission.get('summary', '')}"
+                if not zh
+                else f"任务失败：{mission.get('summary', '')}"
+            )
+        elif status == "cancelled":
+            msg = "Mission cancelled, sir." if not zh else "任务已取消。"
+        else:
+            msg = f"Mission {status}." if not zh else f"任务{status}。"
+        self._mission_speak(msg)
 
     def _map_clean_city(self, candidate: str) -> str:
         """从 ASR 提取的地点名中归一化出真实地名。
