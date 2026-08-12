@@ -90,6 +90,26 @@ class ShortDramaPanel extends StatelessWidget {
                     label:
                         'EP ${controller.currentEpisode.toString().padLeft(2, '0')} / ${controller.totalEpisodes.toString().padLeft(2, '0')}',
                   ),
+                  // 制作进度（Phase 2 渲染中）
+                  if (controller.productionActive) ...[
+                    const SizedBox(height: 8),
+                    _ProgressBar(
+                      progress: (controller.prodProgress / 100).clamp(0.0, 1.0),
+                      label: 'RENDER ${controller.prodShot.toString().padLeft(2, '0')}'
+                          '/${controller.prodTotal.toString().padLeft(2, '0')} · '
+                          '${controller.prodProgress.toStringAsFixed(0)}%',
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${controller.prodState.toUpperCase()}'
+                      '${controller.prodBackend == 'opencut' ? ' · AI BACKEND' : ' · LOCAL FFMPEG'}',
+                      style: const TextStyle(
+                        color: Color(0xFF46E0A8),
+                        fontSize: 8.5,
+                        letterSpacing: 1.4,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 10),
                   // 下一步 / 待确认
                   if (showPending)

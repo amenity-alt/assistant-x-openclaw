@@ -61,6 +61,9 @@ CASES = [
     ("生成第一集镜头提示词", "prompts"),
     ("开始制作第一集", "produce"),
     ("开始制作", "produce"),
+    ("用AI制作第二集", "produce"),
+    ("停止制作", "stop"),
+    ("停止渲染", "stop"),
     ("暂停短剧", "pause"),
     ("继续短剧", "resume"),
     ("进入下一集", "next"),
@@ -186,7 +189,21 @@ r = agent.handle("继续短剧")
 check("继续", r.get("status") == "ok")
 
 r = agent.handle("开始制作第一集")
-check("制作占位(Phase2)", r.get("status") == "phase2", str(r))
+check("制作需确认", r.get("status") == "confirm", str(r))
+# 用假 producer 快速走完制作流程（真实 ffmpeg 渲染在 §5 单测）
+class _FakeProducer:
+    def render(self, *a, **k):
+        return {"status": "success", "output": "/tmp/fake_ep01.mp4",
+                "shots": 3, "duration": 15, "backend": "ffmpeg"}
+
+agent._producer = _FakeProducer()
+r = agent.handle("确认")
+check("确认后开始制作", r.get("status") == "producing", str(r))
+check("制作后台完成", wait_idle())
+p = agent.current_project
+check("第1集已制作", p.episode(1).status == "produced", str(p.episode(1).status))
+check("成品路径记录", p.episode(1).files.get("video") == "/tmp/fake_ep01.mp4")
+check("production done", p.production.get("state") == "done", str(p.production))
 r = agent.handle("重新剪辑这一集")
 check("重剪占位(Phase2)", r.get("status") == "phase2", str(r))
 r = agent.handle("退出短剧")
@@ -218,6 +235,63 @@ agent2.handle("确认")
 check("持久化: 剧本完成", wait_idle(agent2))
 p2 = agent2.current_project
 check("第1集剧本文件存在", os.path.isfile(p2.episode(1).files.get("script.md", "")))
+
+print()
+print(f"PASS={len(PASS)} FAIL={len(FAIL)}")
+if FAIL:
+    print("失败项:")
+    for x in FAIL:
+        print("  -", x)
+    sys.exit(1)
+print("ALL TESTS PASSED")
+
+
+# ── 5. 制作渲染（真实 ffmpeg，小分辨率冒烟）────────────────
+print("== 5. 制作渲染（ffmpeg 小分辨率） ==")
+import shutil as _shutil
+
+_ffmpeg = _shutil.which("ffmpeg")
+if not _ffmpeg:
+    check("ffmpeg 存在（跳过渲染）", True)
+else:
+    import threading as _th
+    from drama_agent.production import EpisodeProducer, ProductionCancelled
+    from drama_agent.models import DramaProject, Episode, StoryboardShot
+
+    prod_project = DramaProject(title="测试短剧", total_episodes=3)
+    prod_project.episodes = [Episode(number=1, title="第一集", status="script_ready")]
+    prod_project.episodes[0].shots = [
+        StoryboardShot(shot_id="shot_01", scene="开场城市街道", character="主角",
+                       action="主角出场", camera="cinematic medium shot",
+                       lighting="自然光", environment="街道", style="cinematic realistic",
+                       mood="紧张", dialogue="这是命运的转折。", voice="Tingting",
+                       duration=2),
+        StoryboardShot(shot_id="shot_02", scene="核心冲突", character="主角",
+                       action="主角面对冲突", camera="close-up",
+                       lighting="对比光", environment="室内", style="cinematic realistic",
+                       mood="冲突", dialogue="", duration=2),
+    ]
+    producer = EpisodeProducer(width=640, height=360, fps=25)
+    progress_log = []
+    res = producer.render(
+        prod_project, 1, backend="ffmpeg",
+        on_progress=lambda st, sh, tot, pct, msg: progress_log.append((st, sh, pct)),
+    )
+    check("渲染成功", res.get("status") == "success", str(res))
+    check("成品文件存在", os.path.isfile(res.get("output", "")), res.get("output", ""))
+    check("进度回调已上报", len(progress_log) >= 3, str(len(progress_log)))
+    check("进度到 100", progress_log[-1][2] == 100 if progress_log else False, str(progress_log[-1] if progress_log else None))
+    dur = res.get("duration", 0)
+    check("时长=镜头合计", dur == 4, str(dur))
+
+    # 取消
+    ev = _th.Event()
+    ev.set()
+    try:
+        producer.render(prod_project, 1, cancel=ev)
+        check("取消抛异常", False)
+    except ProductionCancelled:
+        check("取消抛异常", True)
 
 print()
 print(f"PASS={len(PASS)} FAIL={len(FAIL)}")

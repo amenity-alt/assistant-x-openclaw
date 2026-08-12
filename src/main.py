@@ -3497,7 +3497,8 @@ class VoiceAssistant:
         r"(?:生成|做|出)?\s*第?\s*[\d一二两三四五六七八九十]+\s*集?(?:的)?"
         r"(?:镜头|分镜|提示词|prompt|prompts)|"
         r"(?:开始)?(?:制作|做|开拍)\s*第?\s*[\d一二两三四五六七八九十]+\s*集|"
-        r"开始制作|进入下一集|重新剪辑|重剪|暂停短剧|继续短剧|恢复短剧|"
+        r"用\s*ai\s*(?:制作|做)|ai\s*制作|开始制作|停止制作|停止渲染|取消制作|"
+        r"进入下一集|重新剪辑|重剪|暂停短剧|继续短剧|恢复短剧|"
         r"short\s*drama|drama\s*mode|drama\s*status|exit\s*drama|close\s*drama)",
         re.I,
     )
@@ -3628,6 +3629,7 @@ class VoiceAssistant:
                 "cancelled": "Cancelled.",
                 "no_pending": "No step is waiting for confirmation.",
                 "completed": "All episodes are planned. Video generation connects in phase two.",
+                "producing": "Rendering started, sir. I will report when done.",
                 "phase2": "Production connects in phase two, sir. Script and prompts are ready.",
                 "exit": "Short drama mode off.",
                 "idle": "No drama project yet, sir. Say short drama to start.",

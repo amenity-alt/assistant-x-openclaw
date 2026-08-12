@@ -71,6 +71,10 @@ _RECLIP_RE = re.compile(
     r"|re(?:clip|edit)", re.I
 )
 _PAUSE_RE = re.compile(r"(?:暂停短剧|短剧暂停|暂停制作)|pause\s*drama", re.I)
+_STOP_RE = re.compile(
+    r"(?:停止制作|停止渲染|取消制作|停一下|别做了|stop\s*(?:production|rendering)|cancel\s*production)", re.I
+)
+_AI_PRODUCE_RE = re.compile(r"(?:用\s*ai|ai\s*制作|ai制作)", re.I)
 _RESUME_RE = re.compile(r"(?:继续短剧|恢复短剧|短剧继续)|resume\s*drama", re.I)
 
 YES_RE = re.compile(
@@ -104,11 +108,12 @@ _START_RE = re.compile(
 class DramaIntent:
     cmd: str                       # enter/exit/status/plan/character/episode_view/
                                    # episode_rewrite/prompts/produce/next/reclip/
-                                   # pause/resume/yes/no/collect/help
+                                   # pause/resume/stop/yes/no/collect/help
     episode: int = 0
     text: str = ""
     target: str = ""               # 修改人物目标（如 女主角/林晓）
     change: str = ""               # 修改内容（如 短发）
+    ai: bool = False               # 是否要求 AI(OpenCut) 渲染后端
 
 
 def _clean(text: str) -> str:
@@ -140,6 +145,8 @@ def parse(text: str) -> DramaIntent:
         return DramaIntent(cmd="pause")
     if _RESUME_RE.search(t):
         return DramaIntent(cmd="resume")
+    if _STOP_RE.search(t):
+        return DramaIntent(cmd="stop", text=t)
 
     m = _EPISODE_REWRITE_RE.search(t)
     if m:
@@ -157,7 +164,7 @@ def parse(text: str) -> DramaIntent:
     if m:
         return DramaIntent(cmd="produce",
                            episode=_ep((m.group("a"), m.group("b"))),
-                           text=t)
+                           text=t, ai=bool(_AI_PRODUCE_RE.search(t)))
 
     m = _EPISODE_VIEW_RE.search(t)
     if m:

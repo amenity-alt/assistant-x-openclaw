@@ -148,6 +148,7 @@ class DramaProject:
     characters: list = field(default_factory=list)      # List[Character]
     episodes: list = field(default_factory=list)        # List[Episode]
     pending_confirm: dict = field(default_factory=dict) # {phase, summary}
+    production: dict = field(default_factory=dict)     # {state, progress, shot, total, output}
     history: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -176,6 +177,7 @@ class DramaProject:
             relationship_map=d.get("relationship_map", []),
             episode_goals=d.get("episode_goals", []),
             pending_confirm=d.get("pending_confirm", {}),
+            production=d.get("production", {}),
             history=d.get("history", []),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),

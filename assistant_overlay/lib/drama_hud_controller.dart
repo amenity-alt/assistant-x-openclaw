@@ -16,8 +16,20 @@ class DramaHudController extends ChangeNotifier {
   int totalEpisodes = 10;
   String pendingPhase = '';
   String pendingSummary = '';
+  String prodState = '';
+  double prodProgress = 0;
+  int prodShot = 0;
+  int prodTotal = 0;
+  String prodBackend = '';
+  String prodOutput = '';
   List<String> episodeGoals = const [];
   List<String> characters = const [];
+
+  static const Set<String> _activeProdStates = {
+    'queued', 'preparing', 'rendering', 'concatenating', 'finalizing',
+  };
+
+  bool get productionActive => _activeProdStates.contains(prodState);
 
   static const Map<String, String> _phaseLabel = {
     'collect_req': 'REQUIREMENTS',
@@ -63,6 +75,22 @@ class DramaHudController extends ChangeNotifier {
         pendingPhase = '';
         pendingSummary = '';
       }
+      final prod = data['production'];
+      if (prod is Map<String, dynamic>) {
+        prodState = (prod['state'] as String?) ?? '';
+        prodProgress = ((prod['progress'] as num?) ?? 0).toDouble();
+        prodShot = ((prod['shot'] as num?) ?? 0).toInt();
+        prodTotal = ((prod['total'] as num?) ?? 0).toInt();
+        prodBackend = (prod['backend'] as String?) ?? '';
+        prodOutput = (prod['output'] as String?) ?? '';
+      } else {
+        prodState = '';
+        prodProgress = 0;
+        prodShot = 0;
+        prodTotal = 0;
+        prodBackend = '';
+        prodOutput = '';
+      }
       episodeGoals = ((data['episode_goals'] as List?) ?? const [])
           .map((e) => e.toString())
           .toList();
@@ -86,6 +114,12 @@ class DramaHudController extends ChangeNotifier {
     totalEpisodes = 10;
     pendingPhase = '';
     pendingSummary = '';
+    prodState = '';
+    prodProgress = 0;
+    prodShot = 0;
+    prodTotal = 0;
+    prodBackend = '';
+    prodOutput = '';
     episodeGoals = const [];
     characters = const [];
     notifyListeners();

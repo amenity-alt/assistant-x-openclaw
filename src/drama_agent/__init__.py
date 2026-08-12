@@ -28,6 +28,7 @@ from .confirm_gate import ConfirmGate
 from .episode_writer import EpisodeWriter
 from .models import DramaPhase, DramaStatus, Episode
 from .planner import DramaPlanner
+from .production import EpisodeProducer, ProductionCancelled, ProductionError
 from .prompt_agent import PromptAgent
 from .state_machine import DramaStateMachine
 from .store import DramaProjectStore
@@ -53,12 +54,15 @@ class DramaAgent:
         self._characters = CharacterAgent()
         self._writer = EpisodeWriter()
         self._prompts_agent = PromptAgent()
+        self._producer = EpisodeProducer()
         self._gate = ConfirmGate()
         self._lock = threading.Lock()
         self._current_id = None
         self._busy = False
         self._queued_confirm = None   # 人物修改打断前的待确认（phase/summary）
-        self._gate_episode = None       # 重写目标集
+        self._gate_episode = None       # 重写/制作目标集
+        self._cancel = threading.Event()
+        self._backend = "ffmpeg"        # ffmpeg（默认离线）| opencut（AI）
 
         # main.py 注入的回调
         self.on_message = None          # fn(dict)  口播 + overlay（async 完成）
@@ -171,7 +175,9 @@ class DramaAgent:
         if cmd == "prompts":
             return self._prompts(project, intent.episode, role)
         if cmd == "produce":
-            return self._produce(project, intent.episode)
+            return self._produce(project, intent.episode, intent.ai)
+        if cmd == "stop":
+            return self._stop_production(project)
         if cmd == "next":
             return self._next_episode(project, role)
         if cmd == "reclip":
@@ -372,6 +378,10 @@ class DramaAgent:
         if phase == "rewrite":
             ep = self._gate_episode or project.current_episode
             return self._design_episode(project, ep)
+        if phase == "produce":
+            ep = self._gate_episode or project.current_episode
+            backend = self._backend or "ffmpeg"
+            return self._start_production(project, ep, backend)
         return {"status": "ok", "message": "已确认。"}
 
     # ── 单集剧本（后台线程）───────────────────────────────
@@ -466,6 +476,76 @@ class DramaAgent:
             "message": f"正在为第{number}集生成镜头提示词，请稍等。",
         }
 
+    # ── 制作（Phase 2 渲染）─────────────────────────────
+    def _start_production(self, project, number: int, backend: str = "ffmpeg") -> dict:
+        if not self._begin_generation():
+            return {"status": "busy", "message": "上一个任务还在生成中，请稍候。"}
+        self._cancel.clear()
+        ep = project.episode(number)
+        project.production = {
+            "state": "queued", "progress": 0,
+            "shot": 0, "total": len(ep.shots) if ep else 0,
+            "backend": backend, "output": "",
+        }
+        self._save(project)
+
+        def on_progress(state, shot, total, pct, msg):
+            project.production = {
+                "state": state, "progress": pct,
+                "shot": shot, "total": total,
+                "backend": backend, "output": "",
+            }
+            self._save(project)
+
+        def _work():
+            try:
+                res = self._producer.render(
+                    project, number, backend=backend,
+                    on_progress=on_progress, cancel=self._cancel,
+                )
+                ep = project.episode(number)
+                if ep is not None:
+                    ep.status = "produced"
+                    ep.files["video"] = res["output"]
+                project.production = {
+                    "state": "done", "progress": 100,
+                    "shot": res["shots"], "total": res["shots"],
+                    "backend": backend, "output": res["output"],
+                }
+                self._save(project)
+                self._message(
+                    project,
+                    f"第{number}集渲染完成，视频已导出到 {res['output']}。"
+                    "可以说「查看第X集」或「进入下一集」继续。",
+                    hud=f"EPISODE {number:02d} RENDERED",
+                )
+            except ProductionCancelled:
+                project.production = {"state": "cancelled", "progress": 0,
+                                      "shot": 0, "total": 0,
+                                      "backend": backend, "output": ""}
+                self._save(project)
+                self._message(project, "已停止制作。", hud="DRAMA RENDER STOPPED")
+            except ProductionError as e:
+                project.production = {"state": "failed", "progress": 0,
+                                      "shot": 0, "total": 0,
+                                      "backend": backend, "output": ""}
+                self._save(project)
+                self._message(project, f"制作失败：{e}")
+            except Exception as e:
+                print(f"[Drama] 制作异常: {e}")
+                project.production = {"state": "failed", "progress": 0,
+                                      "shot": 0, "total": 0,
+                                      "backend": backend, "output": ""}
+                self._save(project)
+                self._message(project, f"制作失败：{e}")
+            finally:
+                self._end_generation()
+
+        threading.Thread(target=_work, daemon=True).start()
+        return {"status": "producing",
+                "message": f"开始制作第{number}集（{'AI' if backend == 'opencut' else '本地'}渲染），"
+                           "完成后我会汇报。"}
+
     # ── 人物修改 ──────────────────────────────────────────
     def _modify_character(self, project, intent, role: str) -> dict:
         if self._busy:
@@ -534,13 +614,31 @@ class DramaAgent:
             return {"status": "no_script", "message": f"第{n}集还没有剧本，请先生成剧本。"}
         return self._generate_prompts(project, n)
 
-    def _produce(self, project, number: int) -> dict:
+    def _produce(self, project, number: int, ai: bool = False) -> dict:
+        if self._busy:
+            return {"status": "busy", "message": "还在生成中，请稍候。"}
         n = number or project.current_episode
-        return {
-            "status": "phase2",
-            "message": f"第{n}集制作将在第二阶段接入视频生成与 OpenCut 剪辑。"
-                       "当前已准备好剧本与镜头提示词。",
-        }
+        ep = project.episode(n)
+        if ep is None or not ep.shots:
+            return {"status": "no_script",
+                    "message": f"第{n}集还没有剧本与镜头，请先确认规划后再制作。"}
+        backend = "opencut" if ai else "ffmpeg"
+        self._gate_episode = n
+        self._backend = backend
+        label = "AI（OpenCut）" if backend == "opencut" else "本地"
+        summary = (
+            f"将使用{label}渲染第{n}集（{len(ep.shots)} 个镜头，约"
+            f"{sum(int(s.duration or 5) for s in ep.shots)} 秒），"
+            f"预计需要几分钟，是否开始？"
+        )
+        self._request_confirm(project, "produce", summary)
+        return {"status": "confirm", "message": summary}
+
+    def _stop_production(self, project) -> dict:
+        if not self._busy:
+            return {"status": "idle", "message": "当前没有正在制作的任务。"}
+        self._cancel.set()
+        return {"status": "ok", "message": "好的，正在停止制作…"}
 
     def _next_episode(self, project, role: str) -> dict:
         if self._busy:
@@ -592,6 +690,7 @@ class DramaAgent:
 
     def _exit(self, project) -> dict:
         self._gate.clear()
+        self._cancel.set()
         self._save(project)
         self._message(project, "", hud="DRAMA OFF")
         with self._lock:
@@ -663,12 +762,14 @@ class DramaAgent:
             for k in ("hairstyle", "outfit", "personality", "voice", "background",
                       "appearance_prompt", "consistency_prompt", "age", "gender"):
                 c.pop(k, None)
-        # 集数只保留状态
+        # 集数只保留状态与成品视频路径
         for e in d.get("episodes", []):
             e.pop("script", None)
             e.pop("shots", None)
             e.pop("goal", None)
             e.pop("synopsis", None)
+            files = e.get("files") or {}
+            e["video"] = files.get("video", "")
             e.pop("files", None)
         pending = self._gate.pending()
         d["pending_confirm"] = pending or d.get("pending_confirm", {})
