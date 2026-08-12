@@ -593,6 +593,21 @@ class FFmpegShotRenderer:
                 pass
 
 
+def _render_progress(line: str):
+    """从 remotion 输出行提取 (已渲染帧数, 总帧数)；无匹配返回 None。"""
+    m = re.search(r"Rendered\s+(\d+)/(\d+)", line or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _oc_progress_pct(done: int, total_frames: int) -> int:
+    """OpenCut 渲染进度映射：55% 起步，随帧数推进到 97%。"""
+    if total_frames <= 0:
+        return 55
+    return 55 + int(min(done, total_frames) / total_frames * 42)
+
+
 class OpenCutRenderBackend:
     """OpenCut 成片渲染后端：整集生成 Remotion 工程并一次渲染成 MP4。
 
@@ -642,7 +657,7 @@ class OpenCutRenderBackend:
         def report(state, shot_idx, pct, msg):
             if on_progress:
                 try:
-                    on_progress(state, shot_idx, total, pct, msg)
+                    on_progress(state, shot_idx, pct, msg)
                 except Exception:
                     pass
 
@@ -680,21 +695,64 @@ class OpenCutRenderBackend:
             self._write_project(proj_dir, comp_id, durations, events, bgm=bgm,
                                 engine_import=os.path.join(
                                     self.opencut_root, "src", "engine"))
-            # 4) 渲染
+            # 4) 渲染（流式进度 + 可取消）
             if cancel is not None and cancel.is_set():
                 raise ProductionCancelled("制作已停止")
-            report("rendering", 0, 55, "正在调用 OpenCut 渲染…")
+            report("rendering", 0, 55, "正在启动 OpenCut 渲染…")
             output = os.path.join(out_dir, f"episode_{number:02d}.mp4")
-            _run([
-                "npx", "remotion", "render",
-                os.path.join(proj_dir, "index.ts"), comp_id, output,
-                f"--public-dir={pub_dir}",
-            ], cwd=self.opencut_root, timeout=1800)
+            self._render_remotion(proj_dir, comp_id, output, pub_dir,
+                                  report, cancel)
             report("finalizing", total, 100, "导出完成")
             return output
         finally:
             # 工程目录保留在 out/jarvis-dramas/，供 remotion studio 预览
             pass
+
+    def _render_remotion(self, proj_dir: str, comp_id: str, output: str,
+                         pub_dir: str, report, cancel: threading.Event):
+        """流式读取 remotion 输出解析进度；cancel 时终止子进程。"""
+        cmd = [
+            "npx", "remotion", "render",
+            os.path.join(proj_dir, "index.ts"), comp_id, output,
+            f"--public-dir={pub_dir}",
+        ]
+        proc = subprocess.Popen(
+            cmd, cwd=self.opencut_root, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                if not self._on_render_line(line, report, cancel):
+                    raise ProductionCancelled("制作已停止")
+            rc = proc.wait(timeout=1800)
+        except ProductionCancelled:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise ProductionError("OpenCut 渲染超时（30 分钟）")
+        if rc != 0:
+            raise ProductionError(f"OpenCut 渲染失败（退出码 {rc}）")
+
+    @staticmethod
+    def _on_render_line(line: str, report, cancel: threading.Event = None) -> bool:
+        """处理一行 remotion 输出并上报进度；返回 False 表示应取消。"""
+        if cancel is not None and cancel.is_set():
+            return False
+        m = _render_progress(line)
+        if m:
+            done, total_frames = m
+            if total_frames:
+                report("rendering", 0, _oc_progress_pct(done, total_frames),
+                       f"OpenCut 渲染 {done}/{total_frames} 帧")
+        return True
 
     def _build_facecam(self, shots, chars, durations, pub_dir: str) -> str:
         """黑底视频 + 各镜头对白音轨（按时间轴 adelay 排布）→ public/facecam.mp4。"""

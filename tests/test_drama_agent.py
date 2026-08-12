@@ -293,6 +293,28 @@ with open(os.path.join(_tmp_oc, "config.ts"), encoding="utf-8") as f:
     _cfg = f.read()
 check("config 含 BGM", "bgm.wav" in _cfg and "facecam.mp4" in _cfg)
 
+# Remotion 渲染进度解析（Phase 9）
+import threading as _th
+from drama_agent.production import _render_progress, _oc_progress_pct
+check("进度解析: Rendered 42/225",
+      _render_progress("Rendered 42/225") == (42, 225))
+check("进度解析: 带剩余时间",
+      _render_progress("Rendered 120/225, time remaining: 3s") == (120, 225))
+check("进度解析: 非进度行", _render_progress("Bundling 50%") is None)
+check("进度映射: 55%起按帧推进", _oc_progress_pct(0, 225) == 55)
+check("进度映射: 中段", _oc_progress_pct(112, 225) == 75)
+check("进度映射: 完成前", _oc_progress_pct(225, 225) == 97)
+_render_log = []
+_oc._on_render_line("Rendered 112/225, time remaining: 3s",
+                    lambda st, sh, pct, msg: _render_log.append((st, pct)),
+                    None)
+check("渲染行上报进度", _render_log and _render_log[0] == ("rendering", 75),
+      str(_render_log))
+_cancel_ev = _th.Event()
+_cancel_ev.set()
+check("取消时停止处理", not _oc._on_render_line("Rendered 1/225",
+        lambda *a: None, _cancel_ev))
+
 # 静音检测 + 配音回退
 from drama_agent.production import _dialogue_wav as _dlg, _is_silent_audio as _isa
 _short = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
