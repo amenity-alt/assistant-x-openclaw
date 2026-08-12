@@ -340,6 +340,8 @@ else:
             check("发布包含MP4", "episode_01.mp4" in names)
             check("发布包含字幕", "episode_01.srt" in names)
             check("发布包含海报", "poster.jpg" in names)
+            check("发布包含横版海报", "POSTER.jpg" in names)
+            check("发布包含说明", "README.md" in names)
             info = zf.read("RELEASE_INFO.txt").decode("utf-8")
             check("清单含剧名", "测试短剧" in info, info[:80])
             check("清单含文件大小", "episode_01.mp4" in info)
@@ -371,6 +373,12 @@ v, r = _voice_plan("爷爷", chars, "", "孩子过来")
 check("角色显式音色优先(Grandpa)", v == "Grandpa", v)
 v, r = _voice_plan("路人", chars, "", "你好")
 check("无匹配角色回退女声", v == "Tingting", v)
+v, r = _voice_plan("林晓", chars, "", "快跑", mood="紧张")
+check("紧张情绪语速加快", r > 198, f"rate={r}")
+v, r = _voice_plan("林晓", chars, "", "再见了", mood="悲伤")
+check("悲伤情绪语速放慢", r < 198, f"rate={r}")
+v, r = _voice_plan("陈峰", chars, "", "冷静点", mood="爆发")
+check("爆发情绪叠加加快", r > 175, f"rate={r}")
 
 # ── 7. 一键发布（纯单元，假成片目录）────────────────────
 print("== 7. 一键发布（假成片目录） ==")
@@ -395,6 +403,10 @@ try:
     with _zipfile.ZipFile(_pr["zip_path"]) as zf:
         check("清单在包内", "RELEASE_INFO.txt" in zf.namelist())
         check("成片在包内", "episode_01.mp4" in zf.namelist())
+        check("横版海报在包内", "POSTER.jpg" in zf.namelist())
+        check("README在包内", "README.md" in zf.namelist())
+        check("README含播放说明",
+              "QuickTime" in zf.read("README.md").decode("utf-8"))
     _pr2 = _pub_mod.publish_series(_pp)
     check("重复发布版本 v2", _pr2.get("version") == 2, str(_pr2.get("version")))
     os.remove(os.path.join(_fake_out, "episode_01.mp4"))
