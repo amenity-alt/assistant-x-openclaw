@@ -190,6 +190,62 @@ class VideoAdapter:
             return False
 
 
+
+class DramaAdapter:
+    """短剧能力适配器：薄封装，调用 drama_agent（Phase 1 编排；Phase 2 挂 OpenCut）。"""
+
+    name = "drama"
+
+    def __init__(self):
+        self._agent = None
+
+    def _get(self):
+        if self._agent is None:
+            from drama_agent import get_drama_agent
+            self._agent = get_drama_agent()
+        return self._agent
+
+    def execute(self, step, role: str) -> AgentResult:
+        t0 = time.time()
+        action = step.action
+        params = step.params or {}
+        text = params.get("text") or params.get("task") or ""
+        try:
+            agent = self._get()
+            if action == "status":
+                p = agent.current_project
+                if p is None:
+                    return _ok("success", "当前没有短剧项目", elapsed=time.time() - t0)
+                msg = (f"短剧《{p.title}》：第 {p.current_episode}/{p.total_episodes} 集，"
+                       f"阶段 {p.phase.value}")
+                return _ok("success", msg, elapsed=time.time() - t0)
+            if action == "pause":
+                res = agent.handle("暂停短剧")
+            elif action == "resume":
+                res = agent.handle("继续短剧")
+            elif action == "start":
+                res = agent.handle(text or "短剧剪辑", role=role)
+            elif action in ("plan", "character", "episode", "prompts", "rewrite", "confirm"):
+                res = agent.handle(text, role=role)
+            else:
+                return _ok("failed", f"不支持的短剧动作: {action}", elapsed=time.time() - t0)
+            if res is False or not isinstance(res, dict):
+                return _ok("failed", "短剧模块未消费该指令", elapsed=time.time() - t0)
+            status = "success" if res.get("status") not in ("failed", "no_pending") else "failed"
+            return _ok(status, res.get("message", ""), data=res,
+                       elapsed=time.time() - t0)
+        except Exception as e:
+            return _ok("failed", f"短剧执行异常: {e}", elapsed=time.time() - t0)
+
+    def cancel(self, step) -> bool:
+        try:
+            from drama_agent import get_drama_agent
+            get_drama_agent().handle("暂停短剧")
+            return True
+        except Exception:
+            return False
+
+
 class _NotImplementedAdapter:
     """vision / map 占位：Phase 2 接入真实实现。"""
 
@@ -211,6 +267,7 @@ class AgentRegistry:
         self.register(ComputerAdapter())
         self.register(LLMAdapter())
         self.register(VideoAdapter())
+        self.register(DramaAdapter())
         self.register(_NotImplementedAdapter("vision"))
         self.register(_NotImplementedAdapter("map"))
 

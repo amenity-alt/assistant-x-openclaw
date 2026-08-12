@@ -11,8 +11,10 @@ import 'package:battery_plus/battery_plus.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'agent_visual.dart';
+import 'drama_hud_controller.dart';
 import 'hud_terminal_shell.dart';
 import 'map_globe_card.dart';
+import 'short_drama_panel.dart';
 import 'vision_overlay.dart';
 
 class JarvisRingsPainter extends CustomPainter {
@@ -445,8 +447,10 @@ class JarvisAgentVisual implements AgentVisual {
   String _currentEffect = 'idle';
   bool _isSpeaking = false; // 标记用户是否正在说话
   bool _mapVisible = false; // 左上角地图态势卡片（wake 显示 / hide 隐藏）
+  bool _dramaVisible = false; // 短剧模式 HUD 面板（drama:status 显示 / drama:reset 隐藏）
   final MapGlobeController _mapController = MapGlobeController(); // 缩放/定位/资讯
   final VisionHudController _visionController = VisionHudController(); // 视觉扫描模式（Capability）
+  final DramaHudController _dramaController = DramaHudController(); // 短剧模式（Capability）
 
   // 合并聊天记录：贾维斯与用户按时间顺序交替（你一句我一句）
   final List<_ChatEntry> _chatMessages = [];
@@ -597,6 +601,8 @@ class JarvisAgentVisual implements AgentVisual {
       _currentEffect = 'error';
     } else if (command == 'hide') {
       _mapVisible = false;
+      _dramaVisible = false;
+      _dramaController.reset();
       // 关闭地图时重置视图：下次唤醒回到原始大小、展示完整球体，
       // 不再停留在上次定位的城市/缩放级别。
       _mapController.reset();
@@ -704,6 +710,14 @@ class JarvisAgentVisual implements AgentVisual {
       _visionController.setObjectScan(
         command.substring('vision:scan '.length).trim().toLowerCase() == 'on',
       );
+    } else if (command.startsWith('drama:status ')) {
+      _dramaController.setStatus(command.substring('drama:status '.length));
+      _dramaVisible = true;
+      print('[Drama] status pushed -> panel visible');
+    } else if (command == 'drama:reset') {
+      _dramaVisible = false;
+      _dramaController.reset();
+      print('[Drama] reset -> panel hidden');
     } else if (command.startsWith('user:')) {
       final text = command.substring(5);
       // 用户讲话，从当前值平滑变到 1.3（只触发一次）
@@ -1139,6 +1153,23 @@ class JarvisAgentVisual implements AgentVisual {
                       // 面板之上，任何分辨率都不会与下方状态框重叠。
                       height: math.min(screenWidth * 0.28 * 1.30, screenHeight * 0.40),
                       controller: _mapController,
+                    ),
+            ),
+          ),
+        // 短剧模式 HUD 面板（地图卡下方独立浮窗，地图卡最大底边 0.45H，
+        // 高度上限 0.12H，保证不压到左下 SYSTEM STATUS；Vision 激活时让位）
+        if (_dramaVisible)
+          Positioned(
+            left: 80,
+            top: screenHeight * 0.465,
+            child: AnimatedBuilder(
+              animation: _visionController,
+              builder: (context, child) => _visionController.showHud
+                  ? const SizedBox.shrink()
+                  : ShortDramaPanel(
+                      controller: _dramaController,
+                      width: screenWidth * 0.22,
+                      maxHeight: screenHeight * 0.12,
                     ),
             ),
           ),

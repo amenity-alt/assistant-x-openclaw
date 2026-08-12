@@ -1955,6 +1955,7 @@ class VoiceAssistant:
                             and not self._computer_like(result)
                             and not self._coding_like(result)
                             and not self._video_like(result)
+                            and not self._drama_like(result)
                         ):
                             self.visual.show_user_text(result)
 
@@ -2107,6 +2108,14 @@ class VoiceAssistant:
                                 start_audio_stream()
                                 continue
 
+                            # 短剧确认答复（确认/取消/超时）→ 优先于其他指令处理
+                            if self._handle_drama_confirm(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
                             # Mission Control 确认/控制（任务确认/取消/暂停/继续/跳过/状态）
                             if self._handle_mission_control(recognition_result):
                                 self.visual.show_user_text(recognition_result)
@@ -2134,6 +2143,14 @@ class VoiceAssistant:
 
                             # Video Agent（OpenCut 视频制作）指令 → 本地执行/确认，不进大模型
                             if self._handle_video_command(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
+                            # Short Drama（短剧剪辑模式）指令 → 本地执行/确认，不进大模型
+                            if self._handle_drama_command(recognition_result):
                                 self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
                                 recognition_stream = self.recognizer.create_stream()
@@ -3456,6 +3473,178 @@ class VoiceAssistant:
             threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
         except Exception as e:
             print(f"[Video] 结果口播失败: {e}")
+
+    # ── Short Drama（短剧剪辑模式）语音接入 ─────────────────
+    # 本地拦截（与地图/视觉/视频/编码同级）：短剧剪辑 → 需求收集 → 剧情规划 →
+    # 单集剧本 → 镜头 Prompt，全程语音确认（60s 超时）；生成类后台执行。
+    _DRAMA_DEDUP_TTL = 15.0
+    _last_drama_norm = ""
+    _last_drama_ts = 0.0
+    # 入口类指令（无项目时也消费）；其余分集/人物/提示词指令需短剧模式内消费
+    _DRAMA_ENTER_RE = re.compile(
+        r"(?:短剧剪辑|短剧模式|开启短剧|进入短剧|开始短剧|做个短剧|做短剧|"
+        r"制作短剧|拍个短剧|拍短剧|short\s*drama|drama\s*mode|start\s*drama|"
+        r"退出短剧|关闭短剧|结束短剧|查看短剧进度|短剧进度|短剧到哪|暂停短剧|"
+        r"继续短剧|恢复短剧)", re.I
+    )
+    _DRAMA_LIKE_RE = re.compile(
+        r"(?:短剧|短剧剪辑|短剧模式|开启短剧|进入短剧|查看短剧进度|短剧进度|"
+        r"短剧到哪|重新规划剧情|重新设计|修改人物|改人物|"
+        r"把[^。\n]{0,20}(?:改成|换成|变成)|"
+        r"(?:查看|看看|看下|读一下)\s*(?:第)?\s*[\d一二两三四五六七八九十]+\s*集|"
+        r"(?:重写|重新写|重做)\s*第?\s*[\d一二两三四五六七八九十]+\s*集|"
+        r"第\s*[\d一二两三四五六七八九十]+\s*集(?:重写|重新写|重做)|"
+        r"(?:生成|做|出)?\s*第?\s*[\d一二两三四五六七八九十]+\s*集?(?:的)?"
+        r"(?:镜头|分镜|提示词|prompt|prompts)|"
+        r"(?:开始)?(?:制作|做|开拍)\s*第?\s*[\d一二两三四五六七八九十]+\s*集|"
+        r"开始制作|进入下一集|重新剪辑|重剪|暂停短剧|继续短剧|恢复短剧|"
+        r"short\s*drama|drama\s*mode|drama\s*status|exit\s*drama|close\s*drama)",
+        re.I,
+    )
+    _DRAMA_YES_RE = re.compile(
+        r"^(?:确认|好的|可以|嗯|对|同意|行|好|是|确认继续|继续吧|ok|yes|yep|sure|"
+        r"go ahead|confirmed)$",
+        re.I,
+    )
+    _DRAMA_NO_RE = re.compile(
+        r"^(?:取消|算了|不用|不了|不要|不行|否|不对|no|cancel|never\s*mind|nope)$",
+        re.I,
+    )
+
+    def _drama_like(self, t: str) -> bool:
+        """流式识别阶段的短剧指令预判（避免回声把文字刷进输入框）。"""
+        return bool(self._DRAMA_LIKE_RE.search((t or "").strip()))
+
+    def _handle_drama_command(self, text: str) -> bool:
+        """识别短剧指令：返回 True 表示已消费，不进大模型。"""
+        t = (text or "").strip()
+        if not t or not self._drama_like(t):
+            return False
+        now = time.time()
+        norm = re.sub(r"\s+", "", t).lower()
+        if (
+            norm == self._last_drama_norm
+            and now - self._last_drama_ts < self._DRAMA_DEDUP_TTL
+        ):
+            print(f"[Drama] 重复指令忽略: {t}")
+            return True
+        try:
+            from drama_agent import get_drama_agent
+
+            agent = get_drama_agent()
+            self._bind_drama_callbacks(agent)
+            # 没有短剧项目时，只消费入口/状态/暂停类指令，避免误吞普通聊天
+            # （如「推荐一部短剧给我」「查看第一集」这类普通语句）
+            if agent.current_project is None and not self._DRAMA_ENTER_RE.search(t):
+                return False
+            role = self.current_cfg.get("id", "jarvis") if self.current_cfg else "jarvis"
+            res = agent.handle(t, role=role)
+        except Exception as e:
+            print(f"[Drama] 模块加载失败: {e}")
+            return False
+        if res is False:
+            return False
+        self._last_drama_norm = norm
+        self._last_drama_ts = now
+        self._drama_speak(res)
+        return True
+
+    def _handle_drama_confirm(self, text: str) -> bool:
+        """处理短剧待确认步骤的语音答复：确认/取消；无待确认不消费。"""
+        t = (text or "").strip()
+        if not t:
+            return False
+        try:
+            from drama_agent import get_drama_agent
+
+            agent = get_drama_agent()
+            self._bind_drama_callbacks(agent)
+        except Exception:
+            return False
+        project = agent.current_project
+        if project is None:
+            return False
+        if agent._gate.pending() is None:
+            return False
+        yes = bool(self._DRAMA_YES_RE.match(t))
+        no = bool(self._DRAMA_NO_RE.match(t))
+        if not yes and not no:
+            return False
+        res = agent._confirm(project, yes)
+        if not isinstance(res, dict):
+            return False
+        self._drama_speak(res)
+        return True
+
+    def _bind_drama_callbacks(self, agent):
+        agent.on_message = self._drama_on_message
+        agent.on_confirm_request = self._drama_on_confirm
+        agent.on_project_update = self._drama_push_status
+
+    def _drama_on_message(self, payload: dict):
+        """生成完成回调：口播 + overlay + 推送状态。"""
+        try:
+            msg = (payload.get("message") or "").strip()
+            if not msg:
+                return
+            hud = payload.get("hud")
+            self.visual.show_ai_text(hud if hud else msg)
+            self._drama_push_status(payload.get("project"))
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        except Exception as e:
+            print(f"[Drama] on_message 回调异常: {e}")
+
+    def _drama_on_confirm(self, project_id: str, phase: str, summary: str):
+        """确认请求：口播（跟随角色语言）+ overlay。"""
+        zh = self._current_lang() == "zh"
+        head = "请确认：" if zh else "Awaiting your confirmation, sir: "
+        msg = f"{head}{summary[:140]}"
+        self.visual.show_ai_text(msg)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+
+    def _drama_push_status(self, project_dict):
+        """推送 drama:status <json> 给 Flutter overlay。"""
+        try:
+            if not project_dict:
+                return
+            payload = json.dumps(project_dict, ensure_ascii=False)
+            self.visual.send(f"drama:status {payload}")
+        except Exception as e:
+            print(f"[Drama] push status 异常: {e}")
+
+    def _drama_speak(self, res: dict):
+        """短剧立即结果口播（跟随角色语言）+ overlay。"""
+        try:
+            zh = self._current_lang() == "zh"
+            status = res.get("status", "")
+            msg = (res.get("message") or "").strip()
+            en_heads = {
+                "collecting": "Short drama mode is on. Please tell me the theme, episode count and length per episode, e.g. a 10-episode urban drama, one minute each.",
+                "planning": "Planning the story now, sir. One moment.",
+                "writing": "Writing the episode script now, sir.",
+                "prompting": "Generating shot prompts now, sir.",
+                "busy": "Still generating, sir. Please wait a moment.",
+                "expired": "Confirmation timed out. Task cancelled.",
+                "cancelled": "Cancelled.",
+                "no_pending": "No step is waiting for confirmation.",
+                "completed": "All episodes are planned. Video generation connects in phase two.",
+                "phase2": "Production connects in phase two, sir. Script and prompts are ready.",
+                "exit": "Short drama mode off.",
+                "idle": "No drama project yet, sir. Say short drama to start.",
+                "unhandled": "Sorry, I did not get that.",
+            }
+            if not zh:
+                head = en_heads.get(status)
+                if head:
+                    msg = head
+                elif msg:
+                    msg = f"Done. {msg}"
+            if len(msg) > 220:
+                msg = msg[:220]
+            self.visual.show_ai_text(msg)
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        except Exception as e:
+            print(f"[Drama] 结果口播失败: {e}")
 
     # ── Mission Control 语音接入 ──────────────────────────
     def _mission_like(self, t: str) -> bool:

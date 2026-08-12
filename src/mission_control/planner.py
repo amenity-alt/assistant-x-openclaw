@@ -22,7 +22,8 @@ _PLAN_PROMPT = (
     "click_element, take_screenshot, get_screen_state, list_apps), "
     "llm(actions: summarize, translate, generate, ask), "
     "vision(actions: scan, describe), map(actions: locate, news, reset), "
-    "video(actions: clip, generate, render, export, status).\n"
+    "video(actions: clip, generate, render, export, status), "
+    "drama(actions: start, plan, character, episode, prompts, rewrite, pause, resume, status, confirm).\n"
     "Rules:\n"
     "- coding.modify MUST set requires_confirm=true.\n"
     "- on_failure is one of abort|skip|retry.\n"
@@ -45,6 +46,9 @@ _LOCATE_RE = re.compile(r"(?:定位到|定位|地图|locate|navigate to)\s*(.+)$
 _CLIP_RE = re.compile(
     r"(?:(?:剪辑|制作|生成|做一个|渲染|剪)[^。\n]{0,30}视频|"
     r"视频|video|clip|render|generate)", re.I
+)
+_DRAMA_RE = re.compile(
+    r"(?:短剧|短剧剪辑|短剧模式|drama\s*mode|short\s*drama)", re.I
 )
 
 
@@ -119,6 +123,14 @@ class Planner:
                 {"agent": "map", "action": "locate",
                  "params": {"name": m.group(1).strip()[:100]},
                  "requires_confirm": False, "on_failure": "skip"}
+            )
+        # 短剧：进入短剧剪辑（requires_confirm=True，执行前语音确认）
+        m = _DRAMA_RE.search(t)
+        if m:
+            steps.append(
+                {"agent": "drama", "action": "start",
+                 "params": {"text": t[:300]},
+                 "requires_confirm": True, "on_failure": "abort"}
             )
         # 视频：制作/剪辑/渲染（requires_confirm=True，执行前语音确认）
         m = _CLIP_RE.search(t)
