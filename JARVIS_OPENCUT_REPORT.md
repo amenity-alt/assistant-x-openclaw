@@ -92,6 +92,6 @@ src/assistants/video_agent/
 ## 7. 已知限制 / 下一步
 
 - **generate / facecam 的 AI 分镜走 DeepSeek**：已从 `~/.hermes/profiles/jarvis/.env` 复用 `DEEPSEEK_API_KEY` 写入 OpenCut `.env`。
-- **画面标题/字幕暂缺**：本机 ffmpeg 为精简构建（无 freetype/libass）。如要字幕与标题，可 `brew uninstall ffmpeg && brew install homebrew-ffmpeg/ffmpeg/ffmpeg` 装完整版（较大下载）；当前已自动跳过文本层，不影响成片。
+- **画面标题/字幕**：已装完整版 ffmpeg 9.0（homebrew-ffmpeg tap，含 freetype/libass），字幕（PingFang SC，去掉 MarginV 以兼容 ffmpeg 9 的 libass 渲染）与 drawtext 标题均已验证渲染。渲染链路保留滤镜缺失时优雅降级。
 - **个性化素材剪辑**（选精彩片段/时间线定制）是 Phase 5 预留接口（`project_manager.build_project_config` / `assistants/video_agent/prompt.py`），当前 facecam 走 OpenCut 自带"转写→字幕→渲染"流水线。
 - 提交待做：`git add` + commit `feat: add jarvis opencut video agent` + push `codex/chat-panel-merged`。
