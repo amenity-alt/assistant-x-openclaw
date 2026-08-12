@@ -254,6 +254,67 @@ check("持久化: 剧本完成", wait_idle(agent2))
 p2 = agent2.current_project
 check("第1集剧本文件存在", os.path.isfile(p2.episode(1).files.get("script.md", "")))
 
+# ── 4.5 OpenCut 成片后端（工程生成 / 后端解析）──────────
+print("== 4.5 OpenCut 成片后端 ==")
+from drama_agent.production import OpenCutRenderBackend, ProductionError as _PE
+
+_default_oc = OpenCutRenderBackend._resolve_root("")
+check("OpenCut 默认路径可解析", os.path.isdir(_default_oc), _default_oc)
+try:
+    OpenCutRenderBackend._resolve_root("/nonexistent/opencut")
+    check("OpenCut 非法路径报错", False)
+except _PE:
+    check("OpenCut 非法路径报错", True)
+
+_oc = OpenCutRenderBackend(opencut_root=_default_oc)
+check("OpenCut 后端实例化", _oc.name == "opencut")
+_tmp_oc = tempfile.mkdtemp(prefix="drama_opencut_")
+_engine_abs = os.path.join(_default_oc, "src", "engine")
+_oc._write_project(
+    _tmp_oc, "JarvisDramaEp01", [2, 2],
+    [(3.3, 4.6, "这是命运的转折。"), (5.5, 6.4, "hello world")],
+    bgm=True, engine_import=_engine_abs,
+)
+for _f in ("index.ts", "Root.tsx", "config.ts", "timeline.ts", "subtitles.ts"):
+    check(f"工程文件: {_f}", os.path.isfile(os.path.join(_tmp_oc, _f)))
+with open(os.path.join(_tmp_oc, "Root.tsx"), encoding="utf-8") as f:
+    _root = f.read()
+check("Root 含组合 id", "JarvisDramaEp01" in _root)
+check("Root 绝对导入引擎", _engine_abs in _root)
+check("Root 中文字幕字体", "PingFang SC" in _root)
+with open(os.path.join(_tmp_oc, "timeline.ts"), encoding="utf-8") as f:
+    _tl = f.read()
+check("timeline 含场景卡素材", "shot_01.png" in _tl and "title_card.png" in _tl)
+check("timeline 含片尾卡", "end_card.png" in _tl)
+with open(os.path.join(_tmp_oc, "subtitles.ts"), encoding="utf-8") as f:
+    _sub = f.read()
+check("subtitles 含对白", "这是命运的转折。" in _sub and "hello world" in _sub)
+with open(os.path.join(_tmp_oc, "config.ts"), encoding="utf-8") as f:
+    _cfg = f.read()
+check("config 含 BGM", "bgm.wav" in _cfg and "facecam.mp4" in _cfg)
+
+# 静音检测 + 配音回退
+from drama_agent.production import _dialogue_wav as _dlg, _is_silent_audio as _isa
+_short = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
+_short.close()
+import subprocess as _sp
+_sp.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "anullsrc=r=44100:cl=stereo:d=0.01", _short.name], check=True)
+check("极短音频判定为静音", _isa(_short.name), _short.name)
+_sp.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "sine=frequency=440:duration=1", _short.name], check=True)
+check("正常音调判定为非静音", not _isa(_short.name))
+# Reed 在本机合成中文为静音 → 自动回退（若机器上 Reed 可用则自然通过）
+_wav = _dlg("这是命运的转折。", "Reed", 190)
+check("静音音色自动回退有声音", bool(_wav) and os.path.isfile(_wav) and not _isa(_wav),
+      str(_wav))
+
+_words = _oc._synthesize_words("命运转折", 3.0, 4.0)
+check("中文按字合成词", len(_words) == 4 and _words[0]["word"] == "命", str(_words))
+_ewords = _oc._synthesize_words("hello world", 1.0, 3.0)
+check("英文按词合成词", len(_ewords) == 2 and _ewords[0]["word"] == "hello", str(_ewords))
+check("词时间轴递增", _ewords[0]["start"] < _ewords[1]["end"])
+
 print()
 print(f"PASS={len(PASS)} FAIL={len(FAIL)}")
 if FAIL:
@@ -349,6 +410,33 @@ else:
         check("发布版本递增 v2", pub2.get("version") == 2, str(pub2.get("version")))
     finally:
         _prod_mod._RELEASE_ROOT = _orig_rel
+
+    # OpenCut 后端渲染分支（用假后端跳过真实 remotion，验证编排/打包）
+    class _FakeOpenCutBackend:
+        name = "opencut"
+
+        def __init__(self, *a, **k):
+            pass
+
+        def render_episode(self, project, number, work_dir, out_dir,
+                           on_progress=None, cancel=None, bgm=True):
+            out = os.path.join(out_dir, f"episode_{number:02d}.mp4")
+            with open(out, "wb") as f:
+                f.write(b"fake-open cut")
+            return out
+
+    class _FakeOCProducer(EpisodeProducer):
+        def backends(self):
+            return {"opencut": _FakeOpenCutBackend}
+
+    oc_producer = _FakeOCProducer(width=640, height=360, fps=25)
+    oc_res = oc_producer.render(prod_project, 1, backend="opencut")
+    check("OpenCut 分支渲染成功", oc_res.get("status") == "success", str(oc_res))
+    check("OpenCut 成品文件存在", os.path.isfile(oc_res.get("output", "")))
+    check("OpenCut 字幕已导出", os.path.isfile(oc_res.get("subtitles", "")))
+    check("OpenCut 海报已生成", os.path.isfile(oc_res.get("poster", "")))
+    check("OpenCut 工程快照已打包",
+          os.path.isfile(os.path.join(os.path.dirname(oc_res["output"]), "project.json")))
 
 # ── 6. 声线映射（分角色配音细化）────────────────────────
 print("== 6. 声线映射 ==")

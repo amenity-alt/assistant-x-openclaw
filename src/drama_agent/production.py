@@ -339,13 +339,14 @@ def _poster(project: dict, episode: int, output_path: str):
 
 
 # ── ffmpeg 封装 ──────────────────────────────────────────
-def _run(cmd: list):
+def _run(cmd: list, cwd: str = None, timeout: int = 900):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, cwd=cwd)
     except FileNotFoundError as e:
         raise ProductionError("未找到 ffmpeg，请先安装：brew install ffmpeg") from e
     if r.returncode != 0:
-        raise ProductionError("ffmpeg 失败: " + (r.stderr or r.stdout or "")[-400:])
+        raise ProductionError("命令失败: " + (r.stderr or r.stdout or "")[-400:])
     return r
 
 
@@ -361,6 +362,22 @@ def _probe_duration(path: str) -> float:
         return 0.0
 
 
+def _is_silent_audio(path: str, threshold: float = 0.25) -> bool:
+    """检测合成音频是否静音/极短（macOS 部分 zh_CN 新音色输出 0.01s 空文件）。"""
+    if not os.path.isfile(path):
+        return True
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        dur = float(r.stdout.strip() or 0)
+    except Exception:
+        return True
+    return dur < threshold
+
+
 def _dialogue_wav(text: str, voice: str, rate: int = 190) -> str | None:
     aiff = tempfile.NamedTemporaryFile(suffix=".aiff", delete=False, dir="/tmp")
     aiff.close()
@@ -371,6 +388,29 @@ def _dialogue_wav(text: str, voice: str, rate: int = 190) -> str | None:
         )
         if not os.path.isfile(aiff.name) or os.path.getsize(aiff.name) == 0:
             return None
+        if _is_silent_audio(aiff.name):
+            # 该音色不可用（静音）：回退到本机验证可用的女声/英文声
+            fallback = "Tingting" if _is_zh(text) else "Samantha"
+            if fallback != voice:
+                fb = tempfile.NamedTemporaryFile(suffix=".aiff", delete=False,
+                                                 dir="/tmp")
+                fb.close()
+                try:
+                    subprocess.run(
+                        ["say", "-v", fallback, "-r", str(rate), "-o", fb.name, text],
+                        capture_output=True, timeout=120,
+                    )
+                    if not _is_silent_audio(fb.name):
+                        os.replace(fb.name, aiff.name)
+                    else:
+                        os.remove(fb.name)
+                except Exception:
+                    try:
+                        os.remove(fb.name)
+                    except OSError:
+                        pass
+            if _is_silent_audio(aiff.name):
+                return None
         wav = aiff.name.rsplit(".", 1)[0] + ".wav"
         _run(["ffmpeg", "-y", "-loglevel", "error", "-i", aiff.name, wav])
         return wav
@@ -553,44 +593,281 @@ class FFmpegShotRenderer:
                 pass
 
 
-class OpenCutShotRenderer:
-    """OpenCut 后端：每镜头调用 video_agent.generate（需配置 AI key）。"""
+class OpenCutRenderBackend:
+    """OpenCut 成片渲染后端：整集生成 Remotion 工程并一次渲染成 MP4。
+
+    与 ffmpeg 后端不同：OpenCut（Remotion）在浏览器内渲染，字幕/模板/动效更专业；
+    需要本机已克隆 OpenCut 且 node_modules 安装完成（可用 OPENCUT_ROOT 指定路径）。
+    工程生成在 <opencut>/src/jarvis-dramas/<剧名>_epXX/，可用 remotion studio 预览。
+    """
 
     name = "opencut"
 
-    def __init__(self, width: int = 1920, height: int = 1080, fps: int = 25):
+    def __init__(self, width: int = 1920, height: int = 1080, fps: int = 25,
+                 opencut_root: str = ""):
         self.width = width
         self.height = height
         self.fps = fps
+        self.opencut_root = self._resolve_root(opencut_root)
 
-    def render_shot(self, shot: dict, index: int, total: int, episode: int,
-                    project: dict, work_dir: str) -> str:
-        from video_agent import get_video_agent
+    @staticmethod
+    def _resolve_root(root: str) -> str:
+        root = root or os.environ.get("OPENCUT_ROOT") or \
+            os.path.expanduser("~/Documents/ChatGPT/opencut")
+        root = os.path.abspath(os.path.expanduser(root))
+        if not os.path.isfile(os.path.join(root, "node_modules", ".bin", "remotion")):
+            raise ProductionError(
+                f"OpenCut 未就绪（{root} 缺少 remotion），请先 npm install，"
+                "或设置 OPENCUT_ROOT 指向 OpenCut 仓库")
+        return root
 
-        agent = get_video_agent()
-        if not agent.client.has_ai_key():
-            raise ProductionError("OpenCut 未配置 AI key（DeepSeek/Gemini），"
-                                  "无法使用 AI 后端；请说「开始制作第X集」用默认后端")
-        dur = max(2, min(int(shot.get("duration") or 5), 10))
-        prompt = (shot.get("video_prompt") or shot.get("scene") or "").strip()
-        if not prompt:
-            raise ProductionError(f"镜头 {shot.get('shot_id')} 缺少视频提示词")
-        res = agent.run_sync(
-            f"生成一个{dur}秒视频 {prompt}", duration_sec=dur, timeout=600.0,
+    def render_episode(self, project, number: int, work_dir: str, out_dir: str,
+                       on_progress=None, cancel: threading.Event = None,
+                       bgm: bool = True) -> str:
+        ep = project.episode(number)
+        shots = ep.shots
+        pj = project.to_dict()
+        chars = [c.to_dict() for c in project.characters]
+        total = len(shots)
+        comp_id = f"JarvisDramaEp{number:02d}"
+        # 工程放在 OpenCut 的 out/（已被 opencut .gitignore 忽略），
+        # 引擎用绝对路径导入，避免污染 OpenCut 源码目录
+        proj_dir = os.path.join(
+            self.opencut_root, "out", "jarvis-dramas",
+            f"{_slug(project.title or 'UNTITLED')}_ep{number:02d}")
+        pub_dir = os.path.join(proj_dir, "public")
+        shutil.rmtree(proj_dir, ignore_errors=True)
+        os.makedirs(pub_dir, exist_ok=True)
+
+        def report(state, shot_idx, pct, msg):
+            if on_progress:
+                try:
+                    on_progress(state, shot_idx, total, pct, msg)
+                except Exception:
+                    pass
+
+        try:
+            report("preparing", 0, 5, "正在生成 OpenCut 工程…")
+            # 1) 素材：片头 / 场景卡 / 片尾
+            open_card = _title_card(pj, number, project.total_episodes, "open",
+                                    self.width, self.height)
+            shutil.move(open_card, os.path.join(pub_dir, "title_card.png"))
+            durations = []
+            for i, s in enumerate(shots, start=1):
+                if cancel is not None and cancel.is_set():
+                    raise ProductionCancelled("制作已停止")
+                dur = max(2, min(int(s.duration or 5), 10))
+                durations.append(dur)
+                report("rendering", i, 10 + int(i / total * 25),
+                       f"生成场景卡 {i}/{total}")
+                card = _scene_card(s.to_dict(), i, total, number, pj,
+                                   self.width, self.height)
+                shutil.move(card, os.path.join(pub_dir, f"shot_{i:02d}.png"))
+            end_card = _title_card(pj, number, project.total_episodes, "end",
+                                   self.width, self.height)
+            shutil.move(end_card, os.path.join(pub_dir, "end_card.png"))
+            # 2) 配音音轨 + BGM
+            report("audio", 0, 38, "正在合成配音音轨…")
+            self._build_facecam(shots, chars, durations, pub_dir)
+            if bgm:
+                total_sec = 3.0 + sum(durations) + 3.0
+                bgm_tmp = _bgm_wav(total_sec)
+                shutil.move(bgm_tmp, os.path.join(pub_dir, "bgm.wav"))
+            # 3) Remotion 工程文件
+            report("project", 0, 46, "正在写入 Remotion 工程…")
+            events = _subtitle_events([s.to_dict() for s in shots],
+                                      open_dur=3.0, fade=0.0)
+            self._write_project(proj_dir, comp_id, durations, events, bgm=bgm,
+                                engine_import=os.path.join(
+                                    self.opencut_root, "src", "engine"))
+            # 4) 渲染
+            if cancel is not None and cancel.is_set():
+                raise ProductionCancelled("制作已停止")
+            report("rendering", 0, 55, "正在调用 OpenCut 渲染…")
+            output = os.path.join(out_dir, f"episode_{number:02d}.mp4")
+            _run([
+                "npx", "remotion", "render",
+                os.path.join(proj_dir, "index.ts"), comp_id, output,
+                f"--public-dir={pub_dir}",
+            ], cwd=self.opencut_root, timeout=1800)
+            report("finalizing", total, 100, "导出完成")
+            return output
+        finally:
+            # 工程目录保留在 out/jarvis-dramas/，供 remotion studio 预览
+            pass
+
+    def _build_facecam(self, shots, chars, durations, pub_dir: str) -> str:
+        """黑底视频 + 各镜头对白音轨（按时间轴 adelay 排布）→ public/facecam.mp4。"""
+        open_dur = 3.0
+        total = open_dur + sum(durations) + 3.0
+        src = (f"color=c=black:s={self.width}x{self.height}:"
+               f"r={self.fps}:d={total:.2f}")
+        inputs = ["-y", "-loglevel", "error", "-f", "lavfi", "-i", src]
+        fc, wavs = [], []
+        t = open_dur
+        for i, s in enumerate(shots, start=1):
+            d = durations[i - 1]
+            text = (s.dialogue or "").strip()
+            if text:
+                voice, rate = _voice_plan(s.character or "", chars,
+                                          s.voice or "", text, s.mood or "")
+                wav = _dialogue_wav(text, voice, rate)
+                if wav:
+                    wavs.append((t, wav))
+            t += d
+        out = os.path.join(pub_dir, "facecam.mp4")
+        try:
+            if not wavs:
+                _run([
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", src,
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                    "-t", f"{total:.2f}", "-shortest",
+                    "-c:v", "libx264", "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    out,
+                ])
+                return out
+            for idx, (off, wav) in enumerate(wavs, start=1):
+                ms = int(off * 1000)
+                inputs += ["-i", wav]
+                fc.append(f"[{idx}:a]adelay={ms}|{ms}[a{idx}]")
+            mix = "".join(f"[a{i}]" for i in range(1, len(wavs) + 1))
+            fc.append(f"{mix}amix=inputs={len(wavs)}:duration=longest:normalize=0[aout]")
+            _run([
+                "ffmpeg", *inputs,
+                "-filter_complex", ";".join(fc),
+                "-map", "0:v", "-map", "[aout]", "-t", f"{total:.2f}",
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                "-ar", "44100", "-ac", "2", out,
+            ])
+            return out
+        finally:
+            for _, wav in wavs:
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+
+    def _write_project(self, proj_dir: str, comp_id: str, durations: list,
+                       subtitle_events: list, bgm: bool,
+                       engine_import: str = "../../engine") -> None:
+        """写 index.ts / Root.tsx / config.ts / timeline.ts / subtitles.ts。"""
+        segs = [{
+            "id": "title", "type": "screen-static", "facecamStartSec": 0.0,
+            "durationSec": 3.0, "faceBubble": "hidden", "showSubtitles": False,
+            "screenImage": "title_card.png",
+        }]
+        t = 3.0
+        for i, d in enumerate(durations, start=1):
+            segs.append({
+                "id": f"shot_{i:02d}", "type": "screen-static",
+                "facecamStartSec": round(t, 3), "durationSec": d,
+                "faceBubble": "hidden", "showSubtitles": True,
+                "screenImage": f"shot_{i:02d}.png",
+            })
+            t += d
+        segs.append({
+            "id": "ending", "type": "screen-static",
+            "facecamStartSec": round(t, 3), "durationSec": 3.0,
+            "faceBubble": "hidden", "showSubtitles": False,
+            "screenImage": "end_card.png",
+        })
+
+        timeline_ts = (
+            f'import type {{ TimelineSegment }} from "{engine_import}";\n\n'
+            "export const TIMELINE: TimelineSegment[] = [\n"
+            + ",\n".join("  " + json.dumps(s, ensure_ascii=False) for s in segs)
+            + ",\n];\n"
         )
-        src = (res or {}).get("video_path") or ""
-        if res.get("status") != "success" or not os.path.isfile(src):
-            raise ProductionError(f"OpenCut 生成镜头失败: {res.get('summary', '')}")
-        out = os.path.join(work_dir, f"shot_{index:02d}.mp4")
-        _run([
-            "ffmpeg", "-y", "-loglevel", "error", "-i", src,
-            "-vf", (f"scale={self.width}:{self.height}:force_original_aspect_ratio=decrease,"
-                    f"pad={self.width}:{self.height}:(ow-iw)/2:(oh-ih)/2"),
-            "-r", str(self.fps), "-t", str(dur),
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", out,
-        ])
-        return out
+
+        subs = [{
+            "start": st, "end": en, "text": text,
+            "words": self._synthesize_words(text, st, en),
+        } for st, en, text in subtitle_events]
+        subtitles_ts = (
+            f'import type {{ SubtitleSegment }} from "{engine_import}";\n\n'
+            "export const SUBTITLE_SEGMENTS: SubtitleSegment[] = "
+            + json.dumps(subs, ensure_ascii=False) + ";\n"
+        )
+
+        bgm_line = '  bgMusicAsset: "bgm.wav",\n  bgMusicVolume: 0.10,\n' if bgm else ""
+        config_ts = (
+            f'import type {{ VideoConfig }} from "{engine_import}";\n\n'
+            "export const DRAMA_CONFIG: VideoConfig = {\n"
+            "  playbackRate: 1.0,\n"
+            f"  fps: {self.fps},\n"
+            f"  width: {self.width},\n"
+            f"  height: {self.height},\n"
+            "  crossfadeFrames: 0,\n"
+            '  facecamAsset: "facecam.mp4",\n'
+            + bgm_line +
+            "};\n"
+        )
+
+        root_tsx = (
+            'import React from "react";\n'
+            'import { Composition } from "remotion";\n'
+            f'import {{ VideoComposition, computeTotalFrames }} from "{engine_import}";\n'
+            'import { DRAMA_CONFIG } from "./config";\n'
+            'import { TIMELINE } from "./timeline";\n'
+            'import { SUBTITLE_SEGMENTS } from "./subtitles";\n\n'
+            "const totalFrames = computeTotalFrames(TIMELINE, DRAMA_CONFIG);\n\n"
+            "const JarvisDrama: React.FC = () => (\n"
+            "  <VideoComposition\n"
+            "    timeline={TIMELINE}\n"
+            "    videoConfig={DRAMA_CONFIG}\n"
+            "    subtitleSegments={SUBTITLE_SEGMENTS}\n"
+            '    subtitleStyle={{ fontFamily: "PingFang SC, Heiti SC, Arial, sans-serif",\n'
+            "      fontSize: 58, bottomOffset: 90 }}\n"
+            "  />\n"
+            ");\n\n"
+            "export const RemotionRoot: React.FC = () => (\n"
+            "  <>\n"
+            f"    <Composition id=\"{comp_id}\"\n"
+            "      component={JarvisDrama}\n"
+            "      durationInFrames={totalFrames}\n"
+            "      fps={DRAMA_CONFIG.fps}\n"
+            "      width={DRAMA_CONFIG.width}\n"
+            "      height={DRAMA_CONFIG.height}\n"
+            "    />\n"
+            "  </>\n"
+            ");\n"
+        )
+
+        index_ts = (
+            'import { registerRoot } from "remotion";\n'
+            'import { RemotionRoot } from "./Root";\n\n'
+            "registerRoot(RemotionRoot);\n"
+        )
+
+        files = {
+            "index.ts": index_ts,
+            "Root.tsx": root_tsx,
+            "config.ts": config_ts,
+            "timeline.ts": timeline_ts,
+            "subtitles.ts": subtitles_ts,
+        }
+        for name, content in files.items():
+            with open(os.path.join(proj_dir, name), "w", encoding="utf-8") as f:
+                f.write(content)
+
+    @staticmethod
+    def _synthesize_words(text: str, start: float, end: float) -> list:
+        """无词级时间戳时，把对白按字符/单词均匀切分合成 Word[]（驱动高亮）。"""
+        units = list(text) if _is_zh(text) else text.split()
+        units = [u for u in units if u.strip()]
+        if not units:
+            return []
+        n = len(units)
+        span = max(0.1, end - start)
+        step = span / n
+        return [{
+            "word": u,
+            "start": round(start + i * step, 3),
+            "end": round(start + (i + 1) * step, 3),
+        } for i, u in enumerate(units)]
 
 
 # ── 制作编排 ─────────────────────────────────────────────
@@ -606,7 +883,7 @@ class EpisodeProducer:
         self.bgm = bgm
 
     def backends(self) -> dict:
-        return {"ffmpeg": FFmpegShotRenderer, "opencut": OpenCutShotRenderer}
+        return {"ffmpeg": FFmpegShotRenderer, "opencut": OpenCutRenderBackend}
 
     def render(self, project, number: int, backend: str = "ffmpeg",
                on_progress=None, cancel: threading.Event = None):
@@ -640,6 +917,28 @@ class EpisodeProducer:
 
         clips = []
         try:
+            # OpenCut 成片后端：整集生成 Remotion 工程并一次渲染
+            if backend == "opencut":
+                if cancel is not None and cancel.is_set():
+                    raise ProductionCancelled("制作已停止")
+                output = renderer.render_episode(
+                    project, number, work_dir, out_dir,
+                    on_progress=progress, cancel=cancel, bgm=self.bgm)
+                srt_path = os.path.join(out_dir, f"episode_{number:02d}.srt")
+                _write_srt(_subtitle_events([s.to_dict() for s in shots],
+                                            open_dur=3.0, fade=0.0), srt_path)
+                poster_path = os.path.join(out_dir, "poster.jpg")
+                _poster(pj, number, poster_path)
+                progress("packaging", total, 97, "正在打包成片目录…")
+                self._package(project, number, output, srt_path,
+                              poster_path, out_dir)
+                progress("finalizing", total, 100, "导出完成")
+                return {
+                    "status": "success", "output": output,
+                    "poster": poster_path, "subtitles": srt_path,
+                    "duration": int(_probe_duration(output) or 0),
+                    "shots": total, "backend": backend,
+                }
             use_polish = backend == "ffmpeg"
             # 片头卡
             if use_polish:
