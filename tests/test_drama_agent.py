@@ -71,6 +71,9 @@ CASES = [
     ("发布短剧", "publish"),
     ("一键发布", "publish"),
     ("release drama", "publish"),
+    ("播放第一集", "play"),
+    ("打开第二集成片", "play"),
+    ("play episode 3", "play"),
     ("暂停短剧", "pause"),
     ("继续短剧", "resume"),
     ("进入下一集", "next"),
@@ -222,6 +225,23 @@ check("全部集已制作", all(e.status == "produced" for e in p.episodes),
 r = agent.handle("打包发布")
 check("一键发布", r.get("status") == "publishing", str(r))
 check("发布后台完成", wait_idle())
+# 播放成片（打桩 open，避免真弹 QuickTime）
+import drama_agent as _da_mod
+_open_calls = []
+_orig_popen = _da_mod.subprocess.Popen
+_da_mod.subprocess.Popen = lambda *a, **k: _open_calls.append(a)
+with open("/tmp/fake_ep01.mp4", "wb") as _f:
+    _f.write(b"x")
+r = agent.handle("播放第一集")
+check("播放成片", r.get("status") == "ok", str(r))
+check("open 调用参数", _open_calls and _open_calls[0][0][0] == "open",
+      str(_open_calls))
+check("open 目标路径",
+      _open_calls and _open_calls[0][0][1] == "/tmp/fake_ep01.mp4",
+      str(_open_calls))
+_da_mod.subprocess.Popen = _orig_popen
+r = agent.handle("播放第十一集")
+check("不存在集提示", r.get("status") == "no_episode", str(r))
 r = agent.handle("重新剪辑这一集")
 check("重剪占位(Phase2)", r.get("status") == "phase2", str(r))
 r = agent.handle("退出短剧")
@@ -271,9 +291,12 @@ check("OpenCut 后端实例化", _oc.name == "opencut")
 _tmp_oc = tempfile.mkdtemp(prefix="drama_opencut_")
 _engine_abs = os.path.join(_default_oc, "src", "engine")
 _oc._write_project(
-    _tmp_oc, "JarvisDramaEp01", [2, 2],
+    _tmp_oc, "JarvisDramaEp01",
+    [{"scene": "开场城市", "dialogue": "这是命运的转折。"},
+     {"scene": "核心冲突", "dialogue": ""}],
+    [2, 2],
     [(3.3, 4.6, "这是命运的转折。"), (5.5, 6.4, "hello world")],
-    bgm=True, engine_import=_engine_abs,
+    1, bgm=True, engine_import=_engine_abs,
 )
 for _f in ("index.ts", "Root.tsx", "config.ts", "timeline.ts", "subtitles.ts"):
     check(f"工程文件: {_f}", os.path.isfile(os.path.join(_tmp_oc, _f)))
@@ -286,6 +309,13 @@ with open(os.path.join(_tmp_oc, "timeline.ts"), encoding="utf-8") as f:
     _tl = f.read()
 check("timeline 含场景卡素材", "shot_01.png" in _tl and "title_card.png" in _tl)
 check("timeline 含片尾卡", "end_card.png" in _tl)
+check("模板: 暗角背景", '"vignette"' in _tl)
+check("模板: EP·SHOT 角标", '"EP 01 · SHOT 01"' in _tl)
+check("模板: 场景关键词", '"开场城市"' in _tl)
+check("模板: 对白音波动画", '"audioWaveform"' in _tl and '"shot_01"' in _tl.split("audioWaveform")[0])
+check("模板: 无对白镜头无音波", _tl.count("audioWaveform") == 1, str(_tl.count("audioWaveform")))
+check("Root 含关键词字体", "keywordStyle" in _root and "PingFang SC" in _root)
+check("Root 无重复 keywordStyle", _root.count("keywordStyle") == 1, str(_root.count("keywordStyle")))
 with open(os.path.join(_tmp_oc, "subtitles.ts"), encoding="utf-8") as f:
     _sub = f.read()
 check("subtitles 含对白", "这是命运的转折。" in _sub and "hello world" in _sub)

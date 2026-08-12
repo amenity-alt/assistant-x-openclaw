@@ -692,7 +692,8 @@ class OpenCutRenderBackend:
             report("project", 0, 46, "正在写入 Remotion 工程…")
             events = _subtitle_events([s.to_dict() for s in shots],
                                       open_dur=3.0, fade=0.0)
-            self._write_project(proj_dir, comp_id, durations, events, bgm=bgm,
+            self._write_project(proj_dir, comp_id, [s.to_dict() for s in shots],
+                                durations, events, number, bgm=bgm,
                                 engine_import=os.path.join(
                                     self.opencut_root, "src", "engine"))
             # 4) 渲染（流式进度 + 可取消）
@@ -808,23 +809,47 @@ class OpenCutRenderBackend:
                 except OSError:
                     pass
 
-    def _write_project(self, proj_dir: str, comp_id: str, durations: list,
-                       subtitle_events: list, bgm: bool,
-                       engine_import: str = "../../engine") -> None:
-        """写 index.ts / Root.tsx / config.ts / timeline.ts / subtitles.ts。"""
+    def _write_project(self, proj_dir: str, comp_id: str, shots: list,
+                       durations: list, subtitle_events: list, episode_number: int,
+                       bgm: bool, engine_import: str = "../../engine") -> None:
+        """写 index.ts / Root.tsx / config.ts / timeline.ts / subtitles.ts。
+
+        Jarvis HUD 模板：镜头叠加暗角背景、场景关键词、EP·SHOT 角标；
+        对白镜头加底部音波动画。
+        """
         segs = [{
             "id": "title", "type": "screen-static", "facecamStartSec": 0.0,
             "durationSec": 3.0, "faceBubble": "hidden", "showSubtitles": False,
             "screenImage": "title_card.png",
         }]
         t = 3.0
-        for i, d in enumerate(durations, start=1):
-            segs.append({
+        for i, (d, sh) in enumerate(zip(durations, shots), start=1):
+            seg = {
                 "id": f"shot_{i:02d}", "type": "screen-static",
                 "facecamStartSec": round(t, 3), "durationSec": d,
                 "faceBubble": "hidden", "showSubtitles": True,
                 "screenImage": f"shot_{i:02d}.png",
-            })
+                "backgroundEffect": {
+                    "type": "vignette", "accentColor": "#2F8CFF",
+                    "intensity": 0.45,
+                },
+                "callouts": [{
+                    "text": f"EP {episode_number:02d} · SHOT {i:02d}",
+                    "position": "top-right", "delaySec": 0.4, "durationSec": 2.0,
+                }],
+            }
+            scene = (sh.get("scene") or "").strip()
+            if scene:
+                seg["keywords"] = [{
+                    "text": scene.upper(), "startSec": round(t + 0.3, 3),
+                    "endSec": round(t + d - 0.3, 3),
+                }]
+            if (sh.get("dialogue") or "").strip():
+                seg["audioWaveform"] = {
+                    "barCount": 48, "height": 52, "position": "bottom",
+                    "intensity": 0.5, "color": "#46E0A8",
+                }
+            segs.append(seg)
             t += d
         segs.append({
             "id": "ending", "type": "screen-static",
@@ -879,6 +904,8 @@ class OpenCutRenderBackend:
             "    subtitleSegments={SUBTITLE_SEGMENTS}\n"
             '    subtitleStyle={{ fontFamily: "PingFang SC, Heiti SC, Arial, sans-serif",\n'
             "      fontSize: 58, bottomOffset: 90 }}\n"
+            "    keywordStyle={{ fontFamily: \"PingFang SC, Heiti SC, Arial, sans-serif\",\n"
+            "      fontSize: 44, color: \"#8CC1FA\", topOffset: 70 }}\n"
             "  />\n"
             ");\n\n"
             "export const RemotionRoot: React.FC = () => (\n"

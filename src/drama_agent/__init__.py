@@ -20,6 +20,7 @@ handle() 立即返回，完成后经 on_project_update/on_message 通知。
 
 import os
 import re
+import subprocess
 import threading
 import time
 
@@ -186,6 +187,8 @@ class DramaAgent:
             return self._publish(project)
         if cmd == "next":
             return self._next_episode(project, role)
+        if cmd == "play":
+            return self._play(project, intent.episode)
         if cmd == "reclip":
             return self._reclip(project, intent.episode)
         return {"status": "unhandled", "message": "未识别该短剧指令。"}
@@ -821,6 +824,23 @@ class DramaAgent:
             "status": "phase2",
             "message": f"重新剪辑第{n}集将在第二阶段接入 OpenCut。当前暂不支持。",
         }
+
+    def _play(self, project, number: int) -> dict:
+        """播放指定集成片（QuickTime 打开成品 mp4）。"""
+        n = number or project.current_episode
+        ep = project.episode(n)
+        if ep is None:
+            return {"status": "no_episode", "message": f"还没有第{n}集。"}
+        video = (ep.files or {}).get("video", "")
+        if not video or not os.path.isfile(video):
+            return {"status": "no_video",
+                    "message": f"第{n}集还没有成片，请先制作。"}
+        try:
+            subprocess.Popen(["open", video])
+        except Exception as e:
+            return {"status": "error", "message": f"打开失败：{e}"}
+        return {"status": "ok",
+                "message": f"正在用 QuickTime 打开第{n}集成片。"}
 
     def _replan(self, project, role: str) -> dict:
         if self._busy:

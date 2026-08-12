@@ -65,6 +65,10 @@ _PRODUCE_RE = re.compile(
     r"|start\s*(?:episode\s*(?P<b>" + _CN_NUM + r"))?"
     r"|开始制作", re.I
 )
+_PLAY_RE = re.compile(
+    r"(?:播放|打开|放一下)\s*第?\s*(?P<a>" + _CN_NUM + r")?\s*集(?:的)?(?:成片|视频|mp4)?"
+    r"|play\s*(?:episode\s*(?P<b>\d+))?", re.I
+)
 _NEXT_RE = re.compile(r"(?:进入|开始|做)?(?:下一集|第二集|下集)|next\s*episode", re.I)
 _RECLIP_RE = re.compile(
     r"(?:重新剪辑|重剪)\s*(?:第|这|本)?\s*(?P<a>" + _CN_NUM + r")?\s*集"
@@ -114,7 +118,7 @@ _START_RE = re.compile(
 class DramaIntent:
     cmd: str                       # enter/exit/status/plan/character/episode_view/
                                    # episode_rewrite/prompts/produce/produce_all/next/reclip/
-                                   # pause/resume/stop/publish/yes/no/collect/help
+                                   # pause/resume/stop/publish/play/yes/no/collect/help
     episode: int = 0
     text: str = ""
     target: str = ""               # 修改人物目标（如 女主角/林晓）
@@ -171,6 +175,11 @@ def parse(text: str) -> DramaIntent:
     if _PRODUCE_ALL_RE.search(t):
         return DramaIntent(cmd="produce_all", text=t,
                            ai=bool(_AI_PRODUCE_RE.search(t)))
+
+    m = _PLAY_RE.search(t)
+    if m:
+        return DramaIntent(cmd="play", episode=_ep((m.group("a"), m.group("b"))),
+                           text=t)
 
     m = _PRODUCE_RE.search(t)
     if m:
