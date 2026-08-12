@@ -379,6 +379,18 @@ v, r = _voice_plan("林晓", chars, "", "再见了", mood="悲伤")
 check("悲伤情绪语速放慢", r < 198, f"rate={r}")
 v, r = _voice_plan("陈峰", chars, "", "冷静点", mood="爆发")
 check("爆发情绪叠加加快", r > 175, f"rate={r}")
+v, r = _voice_plan("陈峰", chars, "", "she is gone", mood="悲伤")
+check("悲伤英文切 Whisper", v == "Whisper", v)
+v, r = _voice_plan("陈峰", chars, "", "don't mess with me", mood="愤怒")
+check("愤怒英文切 Daniel", v == "Daniel", v)
+v, r = _voice_plan("林晓", chars, "", "你太过分了", mood="暴怒")
+check("愤怒中文女声切 Meijia", v == "Meijia", v)
+v, r = _voice_plan("林晓", chars, "", "reboot the system", mood="机械")
+check("机械切 Zarvox", v == "Zarvox", v)
+v, r = _voice_plan("林晓", chars, "", "系统重启", mood="机械")
+check("机械中文女声切 Sandy", v == "Sandy", v)
+v, r = _voice_plan("爷爷", chars, "", "我很难过", mood="悲伤")
+check("显式音色优先于情绪", v == "Grandpa", v)
 
 # ── 7. 一键发布（纯单元，假成片目录）────────────────────
 print("== 7. 一键发布（假成片目录） ==")
@@ -415,6 +427,26 @@ try:
         check("无成片报错", False)
     except _pub_mod.ProductionError:
         check("无成片报错", True)
+
+    # 上传框架：未配置 / 本地目录 / none
+    _env_backup = dict(os.environ)
+    try:
+        os.environ.pop("JARVIS_UPLOAD_TARGET", None)
+        up = _pub_mod.upload_release(_pr["zip_path"])
+        check("未配置上传目标→跳过", not up.get("uploaded") and "未配置" in up.get("reason", ""),
+              str(up))
+        up = _pub_mod.upload_release(_pr["zip_path"], provider="none")
+        check("provider=none 不上传", not up.get("uploaded"), str(up))
+        _up_dir = tempfile.mkdtemp(prefix="drama_upload_")
+        os.environ["JARVIS_UPLOAD_TARGET"] = _up_dir
+        up = _pub_mod.upload_release(_pr["zip_path"])
+        check("本地目录上传成功", up.get("uploaded") and os.path.isfile(up.get("url", "")),
+              str(up))
+        check("上传文件名一致",
+              os.path.basename(up.get("url", "")) == os.path.basename(_pr["zip_path"]))
+    finally:
+        os.environ.clear()
+        os.environ.update(_env_backup)
 finally:
     _pub_mod._OUTPUT_ROOT = _orig_out
     _pub_mod._RELEASE_ROOT = _orig_rel2

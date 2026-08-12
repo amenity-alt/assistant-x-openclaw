@@ -138,6 +138,15 @@ _MOOD_RATE = [
     (("神秘", "悬疑", "诡异"), -8),
 ]
 
+# 强情绪 → 直接切换音色（中文(男/女)、英文(男/女)），优先级高于声线关键词、
+# 低于角色显式音色；语速仍按 _MOOD_RATE 调制
+_MOOD_VOICES = [
+    (("悲伤", "哭泣", "哀伤", "绝望"), ("Reed", "Tingting"), ("Whisper", "Whisper")),
+    (("愤怒", "暴怒", "爆发", "吼"), ("Reed", "Meijia"), ("Daniel", "Samantha")),
+    (("神秘", "悬疑", "诡异"), ("Eddy", "Sandy"), ("Whisper", "Whisper")),
+    (("机械", "机器人", "ai"), ("Eddy", "Sandy"), ("Zarvox", "Zarvox")),
+]
+
 
 def _voice_plan(character: str, characters: list, shot_voice: str, text: str,
                 mood: str = "") -> tuple:
@@ -159,10 +168,17 @@ def _voice_plan(character: str, characters: list, shot_voice: str, text: str,
         if any(k in mood for k in keys):
             mood_delta = delta
             break
+    mood_voice = ""
+    for keys, zh_pair, en_pair in _MOOD_VOICES:
+        if any(k in mood for k in keys):
+            mood_voice = (zh_pair if zh else en_pair)[0 if gender == "男" else 1]
+            break
     if explicit:
         name = explicit.split()[0]
         if name in _available_voices():
             return name, max(130, min(260, 190 + mood_delta))
+    if mood_voice:
+        return mood_voice, max(130, min(260, 190 + mood_delta))
     for src in (shot_voice, personality):
         for keys, zh_pair, en_pair, delta in _PERSONA_VOICES:
             if any(k in src for k in keys):
@@ -977,3 +993,51 @@ def publish_series(project, on_progress=None) -> dict:
     return {"status": "success", "zip_path": zip_path,
             "episodes": len(vids), "bytes": os.path.getsize(zip_path),
             "version": version}
+
+
+def upload_release(zip_path: str, provider: str = "auto") -> dict:
+    """发布包上传（可选）：返回 {uploaded, url|path, reason}。
+
+    provider:
+      - auto   读取环境变量 JARVIS_UPLOAD_TARGET：
+               未配置 → 跳过；本地目录 → 复制；s3://bucket/prefix → boto3 上传
+      - local  复制到 JARVIS_UPLOAD_TARGET（必须是本地目录）
+      - none   不上传
+    上传失败不会中断发布流程，仅在汇报中说明原因。
+    """
+    if provider == "none" or not os.path.isfile(zip_path):
+        return {"uploaded": False, "reason": "未上传"}
+    if provider == "auto":
+        target = os.environ.get("JARVIS_UPLOAD_TARGET", "").strip()
+        if not target:
+            return {"uploaded": False,
+                    "reason": "未配置上传目标（设置 JARVIS_UPLOAD_TARGET 为本地目录或 s3://…）"}
+    else:
+        target = os.environ.get("JARVIS_UPLOAD_TARGET", "").strip()
+        if not target:
+            return {"uploaded": False, "reason": "未配置上传目标（JARVIS_UPLOAD_TARGET）"}
+    name = os.path.basename(zip_path)
+    if target.startswith("s3://"):
+        try:
+            import boto3  # 可选依赖
+        except Exception:
+            return {"uploaded": False,
+                    "reason": "未安装 boto3，无法上传 S3（pip install boto3）"}
+        try:
+            rest = target[len("s3://"):]
+            bucket, _, prefix = rest.partition("/")
+            key = (prefix.rstrip("/") + "/" + name).lstrip("/") if prefix else name
+            s3 = boto3.client("s3")
+            s3.upload_file(zip_path, bucket, key)
+            url = f"s3://{bucket}/{key}"
+            return {"uploaded": True, "url": url, "reason": ""}
+        except Exception as e:
+            return {"uploaded": False, "reason": f"S3 上传失败: {e}"}
+    dst_dir = os.path.abspath(os.path.expanduser(target))
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, name)
+        shutil.copyfile(zip_path, dst)
+        return {"uploaded": True, "url": dst, "reason": ""}
+    except Exception as e:
+        return {"uploaded": False, "reason": f"本地复制失败: {e}"}

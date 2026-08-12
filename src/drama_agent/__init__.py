@@ -30,7 +30,7 @@ from .episode_writer import EpisodeWriter
 from .models import DramaPhase, DramaStatus, Episode
 from .planner import DramaPlanner
 from .production import (EpisodeProducer, ProductionCancelled, ProductionError,
-                             publish_series)
+                             publish_series, upload_release)
 from .prompt_agent import PromptAgent
 from .state_machine import DramaStateMachine
 from .store import DramaProjectStore
@@ -774,10 +774,14 @@ class DramaAgent:
                                       "output": res.get("zip_path", "")}
                 self._save(project)
                 mb = (res.get("bytes") or 0) / 1024 / 1024
+                up = upload_release(res.get("zip_path", ""))
+                tail = f"已上传：{up.get('url')}" if up.get("uploaded") else ""
+                if not up.get("uploaded") and up.get("reason") and "未上传" not in up["reason"]:
+                    tail = f"（未上传：{up['reason']}）"
                 self._message(
                     project,
                     f"打包完成：{res.get('episodes', 0)} 集成片已压缩为发布包 "
-                    f"{res.get('zip_path')}（{mb:.1f} MB）。",
+                    f"{res.get('zip_path')}（{mb:.1f} MB）。{tail}",
                     hud="DRAMA RELEASED",
                 )
             except ProductionError as e:
