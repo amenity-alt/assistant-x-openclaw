@@ -1954,6 +1954,7 @@ class VoiceAssistant:
                             and not self._vision_like(result)
                             and not self._computer_like(result)
                             and not self._coding_like(result)
+                            and not self._video_like(result)
                         ):
                             self.visual.show_user_text(result)
 
@@ -2098,6 +2099,14 @@ class VoiceAssistant:
                                 start_audio_stream()
                                 continue
 
+                            # 视频任务确认答复（确认/取消/超时）→ 优先于其他指令处理
+                            if self._handle_video_confirm(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
                             # Mission Control 确认/控制（任务确认/取消/暂停/继续/跳过/状态）
                             if self._handle_mission_control(recognition_result):
                                 self.visual.show_user_text(recognition_result)
@@ -2117,6 +2126,14 @@ class VoiceAssistant:
 
                             # 视觉模式指令（开启/关闭视觉扫描）→ 直接驱动 overlay，不进大模型
                             if self._handle_vision_command(recognition_result):
+                                self.visual.show_user_text(recognition_result)
+                                recognition_result = ""
+                                recognition_stream = self.recognizer.create_stream()
+                                start_audio_stream()
+                                continue
+
+                            # Video Agent（OpenCut 视频制作）指令 → 本地执行/确认，不进大模型
+                            if self._handle_video_command(recognition_result):
                                 self.visual.show_user_text(recognition_result)
                                 recognition_result = ""
                                 recognition_stream = self.recognizer.create_stream()
@@ -2643,6 +2660,11 @@ class VoiceAssistant:
     def stop(self):
         """停止语音助手"""
         self.stop_event.set()
+        try:
+            from video_agent.opencut_client import shutdown_opencut
+            shutdown_opencut()
+        except Exception as e:
+            print(f"[Video] OpenCut 进程回收失败: {e}")
         print("语音助手已关闭。")
 
     def exit_standby(self, instant: bool = False):
@@ -2670,6 +2692,7 @@ class VoiceAssistant:
         self._verified_speaker_name = None
         self._conv_audio_buffer.clear()
         self._coding_pending_confirm = None  # 退下时清空待确认编码任务
+        self._video_pending_confirm = None  # 退下时清空待确认视频任务
         self._mission_step_pending = None  # 退下时清空待确认任务步骤
         play_prebuilt_voice("exit", _random_exit_line())
         while is_tts_playing():
@@ -3256,6 +3279,184 @@ class VoiceAssistant:
         except Exception as e:
             print(f"[Coding] 结果口播失败: {e}")
 
+    # ── Video Agent（OpenCut AI 视频制作）指令 ────────────────
+    # 本地拦截（与地图/视觉/电脑/编码同级）：制作视频/剪辑素材/渲染项目/
+    # 进度查询/取消任务，不进大模型；generate/render 需语音确认（60s 超时
+    # 自动拒绝）。确认口播跟随角色语言。防回声去重窗口同其他模块。
+    _VIDEO_DEDUP_TTL = 15.0
+    _last_video_norm = ""
+    _last_video_ts = 0.0
+    _video_pending_confirm = None  # {confirm_id, mode, project, task, deadline}
+    # 视频指令预判：动词 + 视频域目标词（避免把普通聊天误判成视频任务）
+    _VIDEO_LIKE_RE = re.compile(
+        r"^(?:(?:请|帮我|麻烦|给我|帮)?"
+        r"(?:制作|生成|创建|做一个|做|剪|剪辑|剪一下|剪个|编辑|修剪|渲染|导出|"
+        r"make|create|generate|render|export|cut|trim|edit)"
+        r"(?:一下|个|一个)?\s*"
+        r"(?:这个|那个|我的|当前)?\s*[\w\-_.]{0,16}\s*"
+        r"(?:视频|短视频|宣传片|vlog|录像|素材|时间线|video|clip|footage|movie|project)"
+        r"\s*.{0,50}"
+        r"|(?:视频|渲染|剪辑)\s*(?:进度|状态|好了吗|完成了吗|完事了吗|完了吗|"
+        r"怎么样了|进行到哪|status|progress|is it done)"
+        r"|(?:停止|取消|终止|停掉)\s*(?:渲染|视频|剪辑|任务)"
+        r"|(?:用|把|对)\s*.{0,40}(?:视频|素材|录像)\s*(?:剪|剪辑|做成视频|trim|cut)"
+        r"|(?:ai\s*(?:video|clip|movie)|facecam|上传素材))$",
+        re.I,
+    )
+    _VIDEO_YES_RE = re.compile(
+        r"^(?:确认|确认执行|同意|同意执行|可以|可以执行|执行|批准|好的|行|没问题|"
+        r"yes|ok|okay|go ahead|approve|confirm|do it)$",
+        re.I,
+    )
+    _VIDEO_NO_RE = re.compile(
+        r"^(?:取消|取消执行|拒绝|不要|不要执行|算了|不用了|不了|停下|"
+        r"no|nope|cancel|deny|stop|abort)$",
+        re.I,
+    )
+
+    def _video_like(self, t: str) -> bool:
+        """流式识别阶段的视频指令预判（避免回声把文字刷进输入框）。"""
+        return bool(self._VIDEO_LIKE_RE.match((t or "").strip()))
+
+    def _handle_video_command(self, text: str) -> bool:
+        """识别视频指令：返回 True 表示已消费，不进大模型。"""
+        t = (text or "").strip()
+        if not t or not self._video_like(t):
+            return False
+        now = time.time()
+        norm = re.sub(r"\s+", "", t).lower()
+        if (
+            norm == self._last_video_norm
+            and now - self._last_video_ts < self._VIDEO_DEDUP_TTL
+        ):
+            print(f"[Video] 重复指令忽略: {t}")
+            return True
+        try:
+            from video_agent import get_video_agent
+
+            agent = get_video_agent()
+            res = agent.handle(t)
+        except Exception as e:
+            print(f"[Video] 模块加载失败: {e}")
+            return False
+        if not res:
+            return False
+        self._last_video_norm = norm
+        self._last_video_ts = now
+        if isinstance(res, dict):
+            if res.get("status") == "waiting_confirmation":
+                pending = agent.pending_confirmations()
+                if pending:
+                    last = pending[-1]
+                    self._video_pending_confirm = {
+                        "confirm_id": last["confirm_id"],
+                        "mode": last["mode"],
+                        "project": last["project"],
+                        "task": last["task"],
+                        "deadline": time.time() + last["remaining"],
+                    }
+                    self._ask_video_confirm()
+            else:
+                # 黑名单拒绝 / 进度 / 取消等立即结果 → 直接口播
+                self._video_speak(res)
+            return True
+        res.add_done_callback(self._video_done_cb)
+        return True
+
+    def _handle_video_confirm(self, text: str) -> bool:
+        """处理待确认视频任务的语音答复：确认/取消；超时自动拒绝。"""
+        p = self._video_pending_confirm
+        if not p:
+            return False
+        t = (text or "").strip()
+        if not t:
+            return False
+        expired = (p["deadline"] - time.time()) <= 0
+        yes = bool(self._VIDEO_YES_RE.match(t))
+        no = bool(self._VIDEO_NO_RE.match(t))
+        if not yes and not no:
+            if expired:
+                # 超时静默清理，不打断当前话术
+                self._video_pending_confirm = None
+                try:
+                    from video_agent import get_video_agent
+
+                    get_video_agent().confirm(p["confirm_id"], False)
+                except Exception as e:
+                    print(f"[Video] 超时清理失败: {e}")
+            return False
+        self._video_pending_confirm = None
+        try:
+            from video_agent import get_video_agent
+
+            res = get_video_agent().confirm(p["confirm_id"], yes)
+            if hasattr(res, "add_done_callback"):
+                res.add_done_callback(self._video_done_cb)
+        except Exception as e:
+            print(f"[Video] 确认回调失败: {e}")
+        self._video_speak_confirm(expired=expired, approved=yes)
+        return True
+
+    def _ask_video_confirm(self):
+        """视频任务需确认：口播确认请求（角色语言）+ overlay 文本。"""
+        zh = self._current_lang() == "zh"
+        if zh:
+            msg = "视频渲染需要一些时间，是否确认执行？"
+        else:
+            msg = "Rendering will take a while, sir. Shall I proceed?"
+        self.visual.show_ai_text(msg)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+
+    def _video_speak_confirm(self, expired: bool = False, approved: bool = True):
+        """确认答复口播（角色语言）。"""
+        zh = self._current_lang() == "zh"
+        if expired:
+            msg = "Confirmation timed out. Task cancelled." if not zh else "确认超时，任务已取消。"
+        elif approved:
+            msg = "Understood. Rendering started, sir." if not zh else "好的，开始渲染。"
+        else:
+            msg = "Task cancelled." if not zh else "已取消。"
+        self.visual.show_ai_text(msg)
+        threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+
+    def _video_done_cb(self, f):
+        """视频任务异步完成 → 口播结果（角色语言）。"""
+        try:
+            if not f.cancelled():
+                self._video_speak(f.result())
+        except Exception as e:
+            print(f"[Video] 结果回调失败: {e}")
+
+    def _video_speak(self, result: dict):
+        """视频任务结果口播（角色语言）+ overlay 文本。"""
+        try:
+            zh = self._current_lang() == "zh"
+            status = result.get("status", "")
+            summary = (result.get("summary", "") or "").strip()
+            if status == "success":
+                if summary:
+                    msg = summary if zh else f"Done. {summary}"
+                else:
+                    msg = "视频已完成。" if zh else "Video done."
+            elif status == "denied":
+                msg = summary if zh else "Task denied."
+            elif status == "cancelled":
+                msg = "Task cancelled." if not zh else "任务已取消。"
+            elif status == "failed":
+                msg = f"Failed. {summary}" if not zh else f"任务失败：{summary}"
+            else:
+                msg = summary or ("Done." if not zh else "已完成。")
+            if len(msg) > 220:
+                msg = msg[:220]
+            overlay_msg = msg
+            try:
+                self.visual.show_ai_text(overlay_msg)
+            except Exception as e:
+                print(f"[Video] overlay 文本失败: {e}")
+            threading.Thread(target=self._map_speak, args=(msg,), daemon=True).start()
+        except Exception as e:
+            print(f"[Video] 结果口播失败: {e}")
+
     # ── Mission Control 语音接入 ──────────────────────────
     def _mission_like(self, t: str) -> bool:
         """流式识别阶段的任务指令预判（避免回声把文字刷进输入框）。"""
@@ -3299,6 +3500,12 @@ class VoiceAssistant:
             }.get(action, action)
         if agent == "llm":
             return "Text task"
+        if agent == "video":
+            return {
+                "clip": "Clip video", "generate": "Generate video",
+                "render": "Render video", "export": "Export video",
+                "status": "Video status",
+            }.get(action, action)
         return f"{agent}.{action}"
 
     def _bind_mission_callbacks(self, agent):

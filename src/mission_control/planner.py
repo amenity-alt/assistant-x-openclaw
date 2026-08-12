@@ -21,7 +21,8 @@ _PLAN_PROMPT = (
     "computer(actions: open_app, close_app, switch_app, type_text, press_keys, "
     "click_element, take_screenshot, get_screen_state, list_apps), "
     "llm(actions: summarize, translate, generate, ask), "
-    "vision(actions: scan, describe), map(actions: locate, news, reset).\n"
+    "vision(actions: scan, describe), map(actions: locate, news, reset), "
+    "video(actions: clip, generate, render, export, status).\n"
     "Rules:\n"
     "- coding.modify MUST set requires_confirm=true.\n"
     "- on_failure is one of abort|skip|retry.\n"
@@ -41,6 +42,10 @@ _ANALYZE_RE = re.compile(r"(?:分析|检查|看看|了解|analyze|review|inspect
 _TEST_RE = re.compile(r"(?:测试|跑测试|运行测试|test)", re.I)
 _MODIFY_RE = re.compile(r"(?:优化|修改|修复|重构|加|增加|实现|implement|fix|refactor|optimize|improve)", re.I)
 _LOCATE_RE = re.compile(r"(?:定位到|定位|地图|locate|navigate to)\s*(.+)$", re.I)
+_CLIP_RE = re.compile(
+    r"(?:(?:剪辑|制作|生成|做一个|渲染|剪)[^。\n]{0,30}视频|"
+    r"视频|video|clip|render|generate)", re.I
+)
 
 
 def _extract_json(text: str):
@@ -114,6 +119,14 @@ class Planner:
                 {"agent": "map", "action": "locate",
                  "params": {"name": m.group(1).strip()[:100]},
                  "requires_confirm": False, "on_failure": "skip"}
+            )
+        # 视频：制作/剪辑/渲染（requires_confirm=True，执行前语音确认）
+        m = _CLIP_RE.search(t)
+        if m:
+            steps.append(
+                {"agent": "video", "action": "generate",
+                 "params": {"prompt": t[:300]},
+                 "requires_confirm": True, "on_failure": "abort"}
             )
         # 打开应用
         m = _OPEN_RE.search(t)

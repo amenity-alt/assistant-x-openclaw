@@ -34,7 +34,7 @@ class StepStatus(str, Enum):
 
 
 # 允许规划的 Agent 白名单（planner/executor 共用）
-ALLOWED_AGENTS = ("coding", "computer", "llm", "vision", "map")
+ALLOWED_AGENTS = ("coding", "computer", "llm", "vision", "map", "video")
 
 # 各 Agent 允许的动作（白名单）
 ALLOWED_ACTIONS = {
@@ -47,6 +47,7 @@ ALLOWED_ACTIONS = {
     "llm": ("summarize", "translate", "generate", "ask"),
     "vision": ("scan", "describe"),
     "map": ("locate", "news", "reset"),
+    "video": ("clip", "generate", "render", "export", "status"),
 }
 
 

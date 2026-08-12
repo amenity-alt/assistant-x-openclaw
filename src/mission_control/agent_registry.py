@@ -125,6 +125,71 @@ class LLMAdapter:
         return False
 
 
+class VideoAdapter:
+    name = "video"
+
+    def __init__(self):
+        self._agent = None
+
+    def _get(self):
+        if self._agent is None:
+            from video_agent import get_video_agent
+            self._agent = get_video_agent()
+        return self._agent
+
+    def execute(self, step, role: str) -> AgentResult:
+        t0 = time.time()
+        mode = step.action
+        params = step.params
+        # Mission 层已确认过，直接走 submit_approved 绕过二次 guard
+        from video_agent.task import VideoTask
+        if mode in ("status", "cancel"):
+            text = params.get("text") or params.get("task") or ""
+            try:
+                from video_agent import get_video_agent
+                agent = get_video_agent()
+                if mode == "status":
+                    return _ok("success", agent.status(), elapsed=time.time() - t0)
+                ok = agent.cancel_current()
+                return _ok(
+                    "success" if ok else "failed",
+                    "已停止视频渲染" if ok else "当前没有可停止的视频任务",
+                    elapsed=time.time() - t0,
+                )
+            except Exception as e:
+                return _ok("failed", f"视频操作异常: {e}", elapsed=time.time() - t0)
+        task = VideoTask(
+            mode=mode,
+            prompt=params.get("prompt") or params.get("task") or params.get("text") or "",
+            source_video=params.get("source_video") or "",
+            project=params.get("project") or "",
+            duration_sec=int(params.get("duration_sec") or 0),
+            video_format=params.get("video_format") or "horizontal",
+            voice=params.get("voice") or "",
+        )
+        if not task.prompt and mode != "render":
+            return _ok("failed", "视频步骤缺少任务描述", elapsed=time.time() - t0)
+        agent = self._get()
+        try:
+            from video_agent.task_manager import TaskManager
+            future = agent.tasks.submit_approved(task)
+            result = future.result(timeout=3600.0)
+        except Exception as e:
+            return _ok("failed", f"视频执行异常: {e}", elapsed=time.time() - t0)
+        status = "success" if result.get("status") == "success" else "failed"
+        return _ok(
+            status, result.get("summary", ""), data=result,
+            task_id=task.id, elapsed=time.time() - t0,
+        )
+
+    def cancel(self, step) -> bool:
+        try:
+            from video_agent import get_video_agent
+            return get_video_agent().cancel_current()
+        except Exception:
+            return False
+
+
 class _NotImplementedAdapter:
     """vision / map 占位：Phase 2 接入真实实现。"""
 
@@ -145,6 +210,7 @@ class AgentRegistry:
         self.register(CodingAdapter())
         self.register(ComputerAdapter())
         self.register(LLMAdapter())
+        self.register(VideoAdapter())
         self.register(_NotImplementedAdapter("vision"))
         self.register(_NotImplementedAdapter("map"))
 
