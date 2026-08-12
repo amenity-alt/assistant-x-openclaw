@@ -512,11 +512,12 @@ class DramaAgent:
                 ep = project.episode(number)
                 if ep is not None:
                     ep.status = "produced"
-                    ep.files["video"] = res["output"]
+                    ep.files["video"] = res.get("output", "")
+                    ep.files["subtitles"] = res.get("subtitles", "")
                 project.production = {
                     "state": "done", "progress": 100,
-                    "shot": res["shots"], "total": res["shots"],
-                    "backend": backend, "output": res["output"],
+                    "shot": res.get("shots", 0), "total": res.get("shots", 0),
+                    "backend": backend, "output": res.get("output", ""),
                 }
                 self._save(project)
                 self._message(
@@ -587,7 +588,8 @@ class DramaAgent:
                     ep = project.episode(n)
                     if ep is not None:
                         ep.status = "produced"
-                        ep.files["video"] = res["output"]
+                        ep.files["video"] = res.get("output", "")
+                        ep.files["subtitles"] = res.get("subtitles", "")
                     self._save(project)
                     done.append(n)
                 project.production = {
@@ -879,6 +881,7 @@ class DramaAgent:
             e.pop("synopsis", None)
             files = e.get("files") or {}
             e["video"] = files.get("video", "")
+            e["subtitles"] = files.get("subtitles", "")
             e.pop("files", None)
         pending = self._gate.pending()
         d["pending_confirm"] = pending or d.get("pending_confirm", {})

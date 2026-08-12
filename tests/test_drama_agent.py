@@ -270,6 +270,7 @@ else:
 
     prod_project = DramaProject(title="测试短剧", total_episodes=3)
     prod_project.episodes = [Episode(number=1, title="第一集", status="script_ready")]
+    prod_project.episodes[0].script = "# 第一集\n\n测试剧本正文"
     prod_project.episodes[0].shots = [
         StoryboardShot(shot_id="shot_01", scene="开场城市街道", character="主角",
                        action="主角出场", camera="cinematic medium shot",
@@ -295,6 +296,15 @@ else:
     # 片头3s + 镜头2+2 + 片尾3s = 10s，0.5s 淡入淡出 × 3 处 → ≈8.5s
     check("时长=片头+镜头+片尾-转场", abs(dur - 8.5) <= 0.7, f"dur={dur}")
     check("海报已生成", os.path.isfile(res.get("poster", "")), res.get("poster", ""))
+    srt = res.get("subtitles", "")
+    check("字幕已生成", os.path.isfile(srt), srt)
+    if srt:
+        with open(srt, encoding="utf-8") as f:
+            check("字幕含对白", "这是命运的转折。" in f.read())
+    out_dir = os.path.dirname(res.get("output", ""))
+    check("剧本副本已打包", os.path.isfile(os.path.join(out_dir, "episode_01.md")))
+    check("工程快照已打包", os.path.isfile(os.path.join(out_dir, "project.json")))
+    check("全剧索引已更新", os.path.isfile(os.path.join(out_dir, "SERIES_INDEX.txt")))
 
     # 取消
     ev = _th.Event()

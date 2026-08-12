@@ -14,6 +14,7 @@
 cancel（threading.Event）在镜头/步骤间检查，支持语音“停止制作”。
 """
 
+import json
 import os
 import re
 import shutil
@@ -182,17 +183,6 @@ def _scene_card(shot: dict, index: int, total: int, episode: int,
     d.text((width - 260, height - 320), f"{shot.get('duration', 5)}s",
            font=_font(56), fill=(acc[0], acc[1], acc[2]))
 
-    dialogue = (shot.get("dialogue") or "").strip()
-    if dialogue:
-        box = [64, height - 220, width - 64, height - 88]
-        d.rounded_rectangle(box, radius=16, fill=(0x0A, 0x14, 0x30, 230),
-                            outline=(0x9F, 0xD0, 0xFF, 120), width=2)
-        d.text((96, height - 196), "“" + _wrap(dialogue, 44)[0][:44] + "”",
-               font=f_dlg, fill=(0xFF, 0xFF, 0xFF))
-        d.text((width - 360, height - 196),
-               f"VOICE {_voice_for(char, project.get('characters', []), dialogue)}",
-               font=_font(28), fill=(0x5B, 0x8D, 0xB8))
-
     out = tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir="/tmp")
     out.close()
     img.save(out.name)
@@ -311,6 +301,73 @@ def _bgm_wav(duration: float) -> str:
         "-ar", "44100", "-ac", "2", out.name,
     ])
     return out.name
+
+
+# ── 字幕（SRT 导出 + ASS 烧录）─────────────────────────
+def _subtitle_events(shots: list, open_dur: float = 3.0, fade: float = 0.5):
+    """返回 [(start, end, text)]，按片头+转场偏移计算。"""
+    events = []
+    t = open_dur
+    n = len(shots)
+    for i, sh in enumerate(shots, start=1):
+        d = max(2.0, min(float(sh.get("duration") or 5), 10.0))
+        text = (sh.get("dialogue") or "").strip()
+        if text:
+            visible_end = t + d - fade if i < n else t + d
+            events.append((t + 0.3, max(t + 0.3, visible_end - 0.4), text))
+        t = t + d - (fade if i < n else 0)
+    return events
+
+
+def _ts(sec: float) -> str:
+    h = int(sec // 3600)
+    m = int(sec % 3600 // 60)
+    s = int(sec % 60)
+    ms = int(round((sec - int(sec)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _write_srt(events: list, path: str):
+    lines = []
+    for i, (st, en, text) in enumerate(events, start=1):
+        lines += [str(i), f"{_ts(st)} --> {_ts(en)}", text, ""]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def _write_ass(events: list, path: str):
+    body = "\n".join(
+        f"Dialogue: 0,{_ts(st)},{_ts(en)},Default,,0,0,0,,{text}"
+        for st, en, text in events
+    )
+    ass = (
+        "[Script Info]\n"
+        "PlayResX: 1920\nPlayResY: 1080\n"
+        "ScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Heiti SC,52,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,"
+        "0,0,0,0,100,100,0,0,1,3,1,2,40,40,70,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + body + "\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(ass)
+
+
+def _burn_subtitles(video: str, ass_path: str):
+    tmp = video + ".sub.mp4"
+    _run([
+        "ffmpeg", "-y", "-loglevel", "error", "-i", video,
+        "-vf", f"ass={ass_path}",
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:a", "copy", "-movflags", "+faststart", tmp,
+    ])
+    os.replace(tmp, video)
 
 
 class FFmpegShotRenderer:
@@ -534,17 +591,36 @@ class EpisodeProducer:
                 self._crossfade(clips, output, self.crossfade)
             else:
                 self._concat(clips, output)
+            # 字幕：SRT 导出 + ASS 烧录（仅 ffmpeg 后端）
+            subtitles_path = ""
+            if use_polish:
+                progress("subtitles", total, 91, "正在生成字幕…")
+                events = _subtitle_events(
+                    [s.to_dict() for s in shots], open_dur=3.0,
+                    fade=self.crossfade if self.crossfade > 0 else 0.0)
+                srt_path = os.path.join(out_dir, f"episode_{number:02d}.srt")
+                _write_srt(events, srt_path)
+                subtitles_path = srt_path
+                if events:
+                    ass_path = os.path.join(work_dir, "subs.ass")
+                    _write_ass(events, ass_path)
+                    progress("subtitles", total, 93, "正在烧录字幕…")
+                    _burn_subtitles(output, ass_path)
             # BGM 氛围音
             if use_polish and self.bgm:
-                progress("mixing", total, 94, "正在混入氛围音…")
+                progress("mixing", total, 95, "正在混入氛围音…")
                 self._mix_bgm(output)
-            # 剧集海报
+            # 成片目录打包
+            progress("packaging", total, 97, "正在打包成片目录…")
             poster_path = os.path.join(out_dir, "poster.jpg")
             _poster(pj, number, poster_path)
+            self._package(project, number, output, srt_path if use_polish else "",
+                          poster_path, out_dir)
             progress("finalizing", total, 100, "导出完成")
             return {
                 "status": "success", "output": output,
                 "poster": poster_path,
+                "subtitles": subtitles_path,
                 "duration": int(_probe_duration(output) or 0),
                 "shots": total, "backend": backend,
             }
@@ -578,11 +654,12 @@ class EpisodeProducer:
         inputs = []
         for c in clips:
             inputs += ["-i", c]
+        # 转场 t（1-based）的起点 = Σ_{i<=t} d_i - t*fade（输出时间线）
         offsets = []
-        acc = durs[0]
-        for k in range(1, len(clips)):
-            acc = acc + durs[k] - fade
-            offsets.append(round(acc - durs[k] + fade, 3))
+        prefix = durs[0]
+        for t in range(1, len(clips)):
+            offsets.append(round(prefix - t * fade, 3))
+            prefix += durs[t]
         # 视频链
         v_expr = f"[0:v][1:v]xfade=transition=fade:duration={fade}:offset={offsets[0]}[v1]"
         for k in range(2, len(clips)):
@@ -601,6 +678,55 @@ class EpisodeProducer:
             "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart", output,
         ])
+
+    def _package(self, project, number: int, video: str, srt: str,
+                 poster: str, out_dir: str):
+        """成片目录：剧本副本 + 工程快照 + 全剧索引。"""
+        ep = project.episode(number)
+        # 剧本副本
+        if ep and ep.script:
+            try:
+                with open(os.path.join(out_dir, f"episode_{number:02d}.md"),
+                          "w", encoding="utf-8") as f:
+                    f.write(ep.script)
+            except OSError:
+                pass
+        # 工程快照（紧凑）
+        try:
+            with open(os.path.join(out_dir, "project.json"),
+                      "w", encoding="utf-8") as f:
+                json.dump(self._snapshot(project), f,
+                          ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        # 全剧索引
+        line = (
+            f"EP {number:02d} | {ep.title if ep else ''} | "
+            f"{_probe_duration(video):.1f}s | {os.path.basename(video)}"
+            + (f" | {os.path.basename(srt)}" if srt else "")
+            + (f" | {os.path.basename(poster)}" if poster else "")
+        )
+        idx_path = os.path.join(out_dir, "SERIES_INDEX.txt")
+        try:
+            lines = []
+            if os.path.isfile(idx_path):
+                with open(idx_path, "r", encoding="utf-8") as f:
+                    lines = [l for l in f.read().splitlines() if l.strip()]
+            lines = [l for l in lines if not l.startswith(f"EP {number:02d} |")]
+            lines.append(line)
+            with open(idx_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(lines)) + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _snapshot(project) -> dict:
+        d = project.to_dict()
+        d.pop("history", None)
+        for e in d.get("episodes", []):
+            e.pop("script", None)
+            e.pop("shots", None)
+        return d
 
     def _mix_bgm(self, path: str):
         dur = _probe_duration(path)
