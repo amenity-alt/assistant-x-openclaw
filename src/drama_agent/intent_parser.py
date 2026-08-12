@@ -75,6 +75,9 @@ _STOP_RE = re.compile(
     r"(?:停止制作|停止渲染|取消制作|停一下|别做了|stop\s*(?:production|rendering)|cancel\s*production)", re.I
 )
 _AI_PRODUCE_RE = re.compile(r"(?:用\s*ai|ai\s*制作|ai制作)", re.I)
+_PRODUCE_ALL_RE = re.compile(
+    r"(?:制作|做|渲染)\s*(?:全部|所有|全部集|所有集)|全部制作|render\s*all|make\s*all", re.I
+)
 _RESUME_RE = re.compile(r"(?:继续短剧|恢复短剧|短剧继续)|resume\s*drama", re.I)
 
 YES_RE = re.compile(
@@ -107,7 +110,7 @@ _START_RE = re.compile(
 @dataclass
 class DramaIntent:
     cmd: str                       # enter/exit/status/plan/character/episode_view/
-                                   # episode_rewrite/prompts/produce/next/reclip/
+                                   # episode_rewrite/prompts/produce/produce_all/next/reclip/
                                    # pause/resume/stop/yes/no/collect/help
     episode: int = 0
     text: str = ""
@@ -159,6 +162,10 @@ def parse(text: str) -> DramaIntent:
         return DramaIntent(cmd="prompts",
                            episode=_ep((m.group("a"), m.group("b"))),
                            text=t)
+
+    if _PRODUCE_ALL_RE.search(t):
+        return DramaIntent(cmd="produce_all", text=t,
+                           ai=bool(_AI_PRODUCE_RE.search(t)))
 
     m = _PRODUCE_RE.search(t)
     if m:

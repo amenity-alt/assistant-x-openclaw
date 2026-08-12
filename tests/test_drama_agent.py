@@ -62,6 +62,8 @@ CASES = [
     ("开始制作第一集", "produce"),
     ("开始制作", "produce"),
     ("用AI制作第二集", "produce"),
+    ("制作全部集", "produce_all"),
+    ("全部制作", "produce_all"),
     ("停止制作", "stop"),
     ("停止渲染", "stop"),
     ("暂停短剧", "pause"),
@@ -204,6 +206,14 @@ p = agent.current_project
 check("第1集已制作", p.episode(1).status == "produced", str(p.episode(1).status))
 check("成品路径记录", p.episode(1).files.get("video") == "/tmp/fake_ep01.mp4")
 check("production done", p.production.get("state") == "done", str(p.production))
+r = agent.handle("制作全部集")
+check("批量制作需确认", r.get("status") == "confirm", str(r))
+r = agent.handle("确认")
+check("确认后批量制作", r.get("status") == "producing", str(r))
+check("批量后台完成", wait_idle())
+p = agent.current_project
+check("全部集已制作", all(e.status == "produced" for e in p.episodes),
+      str([(e.number, e.status) for e in p.episodes[:4]]))
 r = agent.handle("重新剪辑这一集")
 check("重剪占位(Phase2)", r.get("status") == "phase2", str(r))
 r = agent.handle("退出短剧")
@@ -282,7 +292,9 @@ else:
     check("进度回调已上报", len(progress_log) >= 3, str(len(progress_log)))
     check("进度到 100", progress_log[-1][2] == 100 if progress_log else False, str(progress_log[-1] if progress_log else None))
     dur = res.get("duration", 0)
-    check("时长=镜头合计", dur == 4, str(dur))
+    # 片头3s + 镜头2+2 + 片尾3s = 10s，0.5s 淡入淡出 × 3 处 → ≈8.5s
+    check("时长=片头+镜头+片尾-转场", abs(dur - 8.5) <= 0.7, f"dur={dur}")
+    check("海报已生成", os.path.isfile(res.get("poster", "")), res.get("poster", ""))
 
     # 取消
     ev = _th.Event()

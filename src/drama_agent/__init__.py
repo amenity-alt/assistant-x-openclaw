@@ -18,6 +18,7 @@ Phase 1 不做视频生成/自动剪辑/自动音频/自动发布（produce/recl
 handle() 立即返回，完成后经 on_project_update/on_message 通知。
 """
 
+import os
 import re
 import threading
 import time
@@ -176,6 +177,8 @@ class DramaAgent:
             return self._prompts(project, intent.episode, role)
         if cmd == "produce":
             return self._produce(project, intent.episode, intent.ai)
+        if cmd == "produce_all":
+            return self._produce_all(project, intent.ai)
         if cmd == "stop":
             return self._stop_production(project)
         if cmd == "next":
@@ -382,6 +385,9 @@ class DramaAgent:
             ep = self._gate_episode or project.current_episode
             backend = self._backend or "ffmpeg"
             return self._start_production(project, ep, backend)
+        if phase == "produce_all":
+            backend = self._backend or "ffmpeg"
+            return self._start_batch_production(project, backend)
         return {"status": "ok", "message": "已确认。"}
 
     # ── 单集剧本（后台线程）───────────────────────────────
@@ -546,6 +552,92 @@ class DramaAgent:
                 "message": f"开始制作第{number}集（{'AI' if backend == 'opencut' else '本地'}渲染），"
                            "完成后我会汇报。"}
 
+    def _start_batch_production(self, project, backend: str = "ffmpeg") -> dict:
+        """按顺序制作全部未完成集。"""
+        if not self._begin_generation():
+            return {"status": "busy", "message": "上一个任务还在生成中，请稍候。"}
+        self._cancel.clear()
+        todo = [e.number for e in project.episodes if e.status != "produced"]
+        project.production = {
+            "state": "queued", "progress": 0,
+            "shot": 0, "total": len(todo), "batch": True,
+            "backend": backend, "output": "",
+        }
+        self._save(project)
+
+        def _work():
+            done, failed = [], []
+            try:
+                for n in todo:
+                    if self._cancel.is_set():
+                        raise ProductionCancelled("制作已停止")
+                    ep = project.episode(n)
+                    project.production.update(
+                        {"state": "rendering", "progress": 0,
+                         "shot": n, "total": len(todo), "batch": True,
+                         "backend": backend, "output": ""})
+                    self._save(project)
+                    self._message(project, f"开始制作第{n}集…",
+                                  hud=f"BATCH RENDER EP {n:02d}")
+                    res = self._producer.render(
+                        project, n, backend=backend, cancel=self._cancel,
+                        on_progress=lambda st, sh, tt, pct, msg, _n=n: self._save(
+                            self._update_batch_progress(project, _n, pct, st)),
+                    )
+                    ep = project.episode(n)
+                    if ep is not None:
+                        ep.status = "produced"
+                        ep.files["video"] = res["output"]
+                    self._save(project)
+                    done.append(n)
+                project.production = {
+                    "state": "done", "progress": 100,
+                    "shot": done[-1] if done else 0, "total": len(todo),
+                    "batch": True, "backend": backend, "output": "",
+                }
+                self._save(project)
+                self._message(
+                    project,
+                    f"批量制作完成：第{'、'.join(map(str, done))}集已导出到 "
+                    f"{os.path.expanduser('~/Movies/JarvisDramas')}。"
+                    if done else "批量制作完成。",
+                    hud="BATCH RENDER DONE",
+                )
+            except ProductionCancelled:
+                project.production = {"state": "cancelled", "progress": 0,
+                                      "shot": 0, "total": len(todo),
+                                      "batch": True, "backend": backend,
+                                      "output": ""}
+                self._save(project)
+                self._message(project, "批量制作已停止。", hud="BATCH RENDER STOPPED")
+            except ProductionError as e:
+                project.production = {"state": "failed", "progress": 0,
+                                      "shot": 0, "total": len(todo),
+                                      "batch": True, "backend": backend,
+                                      "output": ""}
+                self._save(project)
+                self._message(project, f"批量制作失败（第{done[-1] if done else 1}集后停止）：{e}")
+            except Exception as e:
+                print(f"[Drama] 批量制作异常: {e}")
+                project.production = {"state": "failed", "progress": 0,
+                                      "shot": 0, "total": len(todo),
+                                      "batch": True, "backend": backend,
+                                      "output": ""}
+                self._save(project)
+                self._message(project, f"批量制作失败：{e}")
+            finally:
+                self._end_generation()
+
+        threading.Thread(target=_work, daemon=True).start()
+        return {"status": "producing",
+                "message": f"开始批量制作 {len(todo)} 集，完成后我会汇报。"}
+
+    def _update_batch_progress(self, project, episode, pct, state):
+        prod = dict(project.production)
+        prod.update({"state": state, "progress": pct, "shot": episode, "batch": True})
+        project.production = prod
+        return project
+
     # ── 人物修改 ──────────────────────────────────────────
     def _modify_character(self, project, intent, role: str) -> dict:
         if self._busy:
@@ -632,6 +724,23 @@ class DramaAgent:
             f"预计需要几分钟，是否开始？"
         )
         self._request_confirm(project, "produce", summary)
+        return {"status": "confirm", "message": summary}
+
+    def _produce_all(self, project, ai: bool = False) -> dict:
+        if self._busy:
+            return {"status": "busy", "message": "还在生成中，请稍候。"}
+        todo = [e.number for e in project.episodes if e.status != "produced"]
+        if not todo:
+            return {"status": "done", "message": "所有剧集都已制作完成。"}
+        self._gate_episode = 0
+        self._backend = "opencut" if ai else "ffmpeg"
+        label = "AI（OpenCut）" if ai else "本地"
+        summary = (
+            f"将使用{label}按顺序制作剩余 {len(todo)} 集（"
+            f"第{'、'.join(str(n) for n in todo[:5])}"
+            f"{'…' if len(todo) > 5 else ''}），预计需要较长时间，是否开始？"
+        )
+        self._request_confirm(project, "produce_all", summary)
         return {"status": "confirm", "message": summary}
 
     def _stop_production(self, project) -> dict:
