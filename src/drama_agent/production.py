@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 import tempfile
 import threading
 import time
@@ -92,16 +93,70 @@ def _wrap(text: str, width: int) -> list:
     return lines or [""]
 
 
-def _voice_for(character: str, characters: list, text: str) -> str:
+_VOICE_CACHE = None
+
+
+def _available_voices() -> set:
+    """macOS say 可用音色名（首次调用缓存）。"""
+    global _VOICE_CACHE
+    if _VOICE_CACHE is None:
+        try:
+            r = subprocess.run(["say", "-v", "?"], capture_output=True,
+                               text=True, timeout=10)
+            _VOICE_CACHE = {ln.split()[0] for ln in r.stdout.splitlines()
+                            if ln.strip()}
+        except Exception:
+            _VOICE_CACHE = set()
+    return _VOICE_CACHE
+
+
+# 声线关键词 → (中文音色(男/女), 英文音色(男/女), 语速偏移)
+_PERSONA_VOICES = [
+    (("苍老", "年迈", "白发"), ("Grandpa", "Grandma"), ("Fred", "Grandma"), -25),
+    (("慈祥", "和蔼"), ("Grandpa", "Grandma"), ("Fred", "Grandma"), -10),
+    (("小孩", "幼年", "年幼", "天真"), ("Tingting", "Tingting"), ("Alice", "Alice"), +35),
+    (("沉稳", "冷静", "理智"), ("Reed", "Tingting"), ("Alex", "Samantha"), -12),
+    (("冷酷", "高冷", "寡言", "冷漠"), ("Reed", "Tingting"), ("Daniel", "Samantha"), -15),
+    (("霸气", "强势", "威严"), ("Reed", "Tingting"), ("Daniel", "Samantha"), -10),
+    (("阴险", "狡诈", "反派"), ("Reed", "Tingting"), ("Daniel", "Samantha"), -10),
+    (("低沉", "沙哑"), ("Reed", "Tingting"), ("Daniel", "Samantha"), -15),
+    (("甜美", "温柔", "温婉"), ("Tingting", "Tingting"), ("Samantha", "Samantha"), +8),
+    (("活泼", "调皮", "可爱", "俏皮"), ("Tingting", "Tingting"), ("Alice", "Samantha"), +15),
+    (("激动", "愤怒", "激昂"), ("Reed", "Tingting"), ("Alex", "Samantha"), +12),
+]
+
+
+def _voice_plan(character: str, characters: list, shot_voice: str, text: str) -> tuple:
+    """返回 (macOS 音色, 语速)。
+
+    优先级：角色显式音色名 > 台词声线标注/性格关键词 > 性别+语言默认。
+    """
     zh = _is_zh(text)
-    gender = ""
+    gender, personality, explicit = "", "", ""
     for c in characters:
         if c.get("name") == character:
             gender = c.get("gender", "")
+            personality = c.get("personality", "")
+            explicit = (c.get("voice") or "").strip()
             break
+    if explicit:
+        name = explicit.split()[0]
+        if name in _available_voices():
+            return name, 190
+    for src in (shot_voice, personality):
+        for keys, zh_pair, en_pair, delta in _PERSONA_VOICES:
+            if any(k in src for k in keys):
+                pair = zh_pair if zh else en_pair
+                voice = pair[0] if gender == "男" else pair[1]
+                return voice, max(130, min(260, 190 + delta))
     if zh:
-        return "Reed" if gender == "男" else "Tingting"
-    return "Alex" if gender == "男" else "Samantha"
+        return ("Reed" if gender == "男" else "Tingting"), 190
+    return ("Alex" if gender == "男" else "Samantha"), 190
+
+
+def _voice_for(character: str, characters: list, text: str) -> str:
+    """兼容旧接口：仅返回音色（默认语速）。"""
+    return _voice_plan(character, characters, "", text)[0]
 
 
 # ── 场景卡 / 片头片尾 / 海报（PIL，JARVIS HUD 风格）────────
@@ -411,7 +466,7 @@ class FFmpegShotRenderer:
 
     def render_card(self, card_path: str, duration: float, motion: int,
                     work_dir: str, shot_id: str, dialogue: str = "",
-                    voice: str = "") -> str:
+                    voice: str = "", rate: int = 190) -> str:
         dur = max(2.0, min(duration, 10.0))
         frames = int(dur * self.fps)
         silent = os.path.join(work_dir, f"{shot_id}_v.mp4")
@@ -424,7 +479,7 @@ class FFmpegShotRenderer:
         ])
         out = os.path.join(work_dir, f"{shot_id}.mp4")
         if dialogue:
-            wav = _dialogue_wav(dialogue, voice)
+            wav = _dialogue_wav(dialogue, voice, rate)
             if wav:
                 _run([
                     "ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", wav,
@@ -450,9 +505,10 @@ class FFmpegShotRenderer:
         try:
             char = (shot.get("character") or "").strip()
             dialogue = (shot.get("dialogue") or "").strip()
-            voice = _voice_for(char, project.get("characters", []), dialogue)
+            voice, rate = _voice_plan(char, project.get("characters", []),
+                                      shot.get("voice") or "", dialogue)
             return self.render_card(card, dur, (index - 1) % 6, work_dir,
-                                    f"shot_{index:02d}", dialogue, voice)
+                                    f"shot_{index:02d}", dialogue, voice, rate)
         finally:
             try:
                 os.remove(card)
@@ -749,3 +805,81 @@ class EpisodeProducer:
                 os.remove(bgm)
             except OSError:
                 pass
+
+
+# ── 一键打包发布（全剧 zip）────────────────────────────
+_RELEASE_ROOT = os.path.expanduser("~/Movies/JarvisReleases")
+
+
+def _release_manifest(project, src: str, files: list) -> str:
+    lines = [
+        "JARVIS SHORT DRAMA RELEASE",
+        "==========================",
+        f"Title      : {project.title}",
+        f"Genre      : {project.genre or '-'}",
+        f"Episodes   : {project.total_episodes}",
+        f"Backend    : ffmpeg",
+        "",
+        "FILES",
+        "-----",
+    ]
+    total = 0
+    for name in files:
+        sz = os.path.getsize(os.path.join(src, name))
+        total += sz
+        lines.append(f"{name:32s} {sz:>10,} bytes")
+    lines.append(f"{'TOTAL':32s} {total:>10,} bytes")
+    lines.append("")
+    lines.append(f"Created    : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    return "\n".join(lines) + "\n"
+
+
+def publish_series(project, on_progress=None) -> dict:
+    """一键打包发布：全剧成片目录 → 单个 zip（含 RELEASE_INFO.txt 清单）。
+
+    发布包递增版本号（<剧名>_v1.zip / v2 / ...），输出到 ~/Movies/JarvisReleases/。
+    """
+    src = os.path.join(_OUTPUT_ROOT, _slug(project.title))
+    if not os.path.isdir(src):
+        raise ProductionError("还没有成片目录，请先制作至少一集。")
+    files = [f for f in sorted(os.listdir(src))
+             if os.path.isfile(os.path.join(src, f))]
+    vids = [f for f in files if f.lower().endswith(".mp4")]
+    if not vids:
+        raise ProductionError("成片目录里没有 MP4 成片，请先制作。")
+    os.makedirs(_RELEASE_ROOT, exist_ok=True)
+    version = 1
+    while os.path.exists(os.path.join(_RELEASE_ROOT, f"{_slug(project.title)}_v{version}.zip")):
+        version += 1
+    zip_path = os.path.join(_RELEASE_ROOT, f"{_slug(project.title)}_v{version}.zip")
+
+    def report(state, pct, msg):
+        if on_progress:
+            try:
+                on_progress(state, len(vids), pct, msg)
+            except Exception:
+                pass
+
+    report("publish", 5, "正在生成发布清单…")
+    manifest = _release_manifest(project, src, files)
+    mf = tempfile.NamedTemporaryFile(suffix=".txt", delete=False,
+                                     mode="w", encoding="utf-8",
+                                     dir=tempfile.gettempdir())
+    mf.write(manifest)
+    mf.close()
+    total = len(files) + 1
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(mf.name, "RELEASE_INFO.txt")
+            for i, name in enumerate(files, start=2):
+                report("publish", 10 + int((i - 1) / total * 85), f"正在压缩 {name}…")
+                zf.write(os.path.join(src, name), name)
+    finally:
+        try:
+            os.remove(mf.name)
+        except OSError:
+            pass
+    report("publish", 100, "发布包已生成")
+    return {"status": "success", "zip_path": zip_path,
+            "episodes": len(vids), "bytes": os.path.getsize(zip_path),
+            "version": version}

@@ -8,6 +8,7 @@
 
 import json
 import os
+import zipfile as _zipfile
 import sys
 import tempfile
 import time
@@ -66,6 +67,10 @@ CASES = [
     ("全部制作", "produce_all"),
     ("停止制作", "stop"),
     ("停止渲染", "stop"),
+    ("打包发布", "publish"),
+    ("发布短剧", "publish"),
+    ("一键发布", "publish"),
+    ("release drama", "publish"),
     ("暂停短剧", "pause"),
     ("继续短剧", "resume"),
     ("进入下一集", "next"),
@@ -214,6 +219,9 @@ check("批量后台完成", wait_idle())
 p = agent.current_project
 check("全部集已制作", all(e.status == "produced" for e in p.episodes),
       str([(e.number, e.status) for e in p.episodes[:4]]))
+r = agent.handle("打包发布")
+check("一键发布", r.get("status") == "publishing", str(r))
+check("发布后台完成", wait_idle())
 r = agent.handle("重新剪辑这一集")
 check("重剪占位(Phase2)", r.get("status") == "phase2", str(r))
 r = agent.handle("退出短剧")
@@ -314,6 +322,90 @@ else:
         check("取消抛异常", False)
     except ProductionCancelled:
         check("取消抛异常", True)
+
+    # 一键发布（把真实渲染目录打包成 zip，发布目录重定向到临时目录）
+    import drama_agent.production as _prod_mod
+    _tmp_pub = tempfile.mkdtemp(prefix="drama_release_")
+    _orig_rel = _prod_mod._RELEASE_ROOT
+    _prod_mod._RELEASE_ROOT = os.path.join(_tmp_pub, "releases")
+    try:
+        pub = _prod_mod.publish_series(
+            prod_project, on_progress=lambda st, n, pct, msg: None)
+        check("真实渲染后发布成功", pub.get("status") == "success", str(pub))
+        check("发布包含成片", os.path.isfile(pub.get("zip_path", "")),
+              pub.get("zip_path", ""))
+        with _zipfile.ZipFile(pub["zip_path"]) as zf:
+            names = zf.namelist()
+            check("发布包含清单", "RELEASE_INFO.txt" in names)
+            check("发布包含MP4", "episode_01.mp4" in names)
+            check("发布包含字幕", "episode_01.srt" in names)
+            check("发布包含海报", "poster.jpg" in names)
+            info = zf.read("RELEASE_INFO.txt").decode("utf-8")
+            check("清单含剧名", "测试短剧" in info, info[:80])
+            check("清单含文件大小", "episode_01.mp4" in info)
+        pub2 = _prod_mod.publish_series(prod_project)
+        check("发布版本递增 v2", pub2.get("version") == 2, str(pub2.get("version")))
+    finally:
+        _prod_mod._RELEASE_ROOT = _orig_rel
+
+# ── 6. 声线映射（分角色配音细化）────────────────────────
+print("== 6. 声线映射 ==")
+from drama_agent.production import _voice_plan
+
+chars = [
+    {"name": "林晓", "gender": "女", "personality": "坚韧甜美", "voice": ""},
+    {"name": "陈峰", "gender": "男", "personality": "冷酷沉稳", "voice": ""},
+    {"name": "爷爷", "gender": "男", "personality": "慈祥和蔼", "voice": "Grandpa"},
+]
+v, r = _voice_plan("林晓", chars, "", "你好呀")
+check("中文女声默认 Tingting", v == "Tingting", v)
+check("甜美性格语速加快", r > 190, f"rate={r}")
+v, r = _voice_plan("陈峰", chars, "", "来了")
+check("中文男声默认 Reed", v == "Reed", v)
+check("冷酷性格语速放慢", r < 190, f"rate={r}")
+v, r = _voice_plan("林晓", chars, "", "hello world")
+check("英文女声默认 Samantha", v == "Samantha", v)
+v, r = _voice_plan("陈峰", chars, "低沉,沙哑", "hello")
+check("台词声线标注优先(Daniel)", v == "Daniel", v)
+v, r = _voice_plan("爷爷", chars, "", "孩子过来")
+check("角色显式音色优先(Grandpa)", v == "Grandpa", v)
+v, r = _voice_plan("路人", chars, "", "你好")
+check("无匹配角色回退女声", v == "Tingting", v)
+
+# ── 7. 一键发布（纯单元，假成片目录）────────────────────
+print("== 7. 一键发布（假成片目录） ==")
+import drama_agent.production as _pub_mod
+_tmp_pub2 = tempfile.mkdtemp(prefix="drama_pub_")
+_fake_out = os.path.join(_tmp_pub2, "测试发布剧")
+os.makedirs(_fake_out)
+for _n in ("episode_01.mp4", "episode_01.srt", "poster.jpg",
+           "project.json", "SERIES_INDEX.txt"):
+    with open(os.path.join(_fake_out, _n), "wb") as f:
+        f.write(b"x" * 100)
+_orig_out = _pub_mod._OUTPUT_ROOT
+_orig_rel2 = _pub_mod._RELEASE_ROOT
+_pub_mod._OUTPUT_ROOT = _tmp_pub2
+_pub_mod._RELEASE_ROOT = os.path.join(_tmp_pub2, "releases")
+try:
+    _pp = DramaProject(title="测试发布剧", total_episodes=2)
+    _pr = _pub_mod.publish_series(_pp, on_progress=lambda st, n, pct, msg: None)
+    check("发布成功", _pr.get("status") == "success", str(_pr))
+    check("发布包存在", os.path.isfile(_pr.get("zip_path", "")))
+    check("发布包版本 v1", _pr.get("version") == 1, str(_pr.get("version")))
+    with _zipfile.ZipFile(_pr["zip_path"]) as zf:
+        check("清单在包内", "RELEASE_INFO.txt" in zf.namelist())
+        check("成片在包内", "episode_01.mp4" in zf.namelist())
+    _pr2 = _pub_mod.publish_series(_pp)
+    check("重复发布版本 v2", _pr2.get("version") == 2, str(_pr2.get("version")))
+    os.remove(os.path.join(_fake_out, "episode_01.mp4"))
+    try:
+        _pub_mod.publish_series(_pp)
+        check("无成片报错", False)
+    except _pub_mod.ProductionError:
+        check("无成片报错", True)
+finally:
+    _pub_mod._OUTPUT_ROOT = _orig_out
+    _pub_mod._RELEASE_ROOT = _orig_rel2
 
 print()
 print(f"PASS={len(PASS)} FAIL={len(FAIL)}")

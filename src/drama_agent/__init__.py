@@ -29,7 +29,8 @@ from .confirm_gate import ConfirmGate
 from .episode_writer import EpisodeWriter
 from .models import DramaPhase, DramaStatus, Episode
 from .planner import DramaPlanner
-from .production import EpisodeProducer, ProductionCancelled, ProductionError
+from .production import (EpisodeProducer, ProductionCancelled, ProductionError,
+                             publish_series)
 from .prompt_agent import PromptAgent
 from .state_machine import DramaStateMachine
 from .store import DramaProjectStore
@@ -181,6 +182,8 @@ class DramaAgent:
             return self._produce_all(project, intent.ai)
         if cmd == "stop":
             return self._stop_production(project)
+        if cmd == "publish":
+            return self._publish(project)
         if cmd == "next":
             return self._next_episode(project, role)
         if cmd == "reclip":
@@ -750,6 +753,52 @@ class DramaAgent:
             return {"status": "idle", "message": "当前没有正在制作的任务。"}
         self._cancel.set()
         return {"status": "ok", "message": "好的，正在停止制作…"}
+
+    def _publish(self, project) -> dict:
+        """一键打包发布：全剧成片目录 → zip（后台线程，完成后口播路径）。"""
+        if not self._begin_generation():
+            return {"status": "busy", "message": "上一个任务还在生成中，请稍候。"}
+
+        def on_progress(state, n, pct, msg):
+            project.production = {"state": state, "progress": pct,
+                                  "shot": 0, "total": n,
+                                  "backend": "ffmpeg", "output": ""}
+            self._save(project)
+
+        def _work():
+            try:
+                res = publish_series(project, on_progress=on_progress)
+                project.production = {"state": "done", "progress": 100,
+                                      "shot": 0, "total": res.get("episodes", 0),
+                                      "backend": "ffmpeg",
+                                      "output": res.get("zip_path", "")}
+                self._save(project)
+                mb = (res.get("bytes") or 0) / 1024 / 1024
+                self._message(
+                    project,
+                    f"打包完成：{res.get('episodes', 0)} 集成片已压缩为发布包 "
+                    f"{res.get('zip_path')}（{mb:.1f} MB）。",
+                    hud="DRAMA RELEASED",
+                )
+            except ProductionError as e:
+                project.production = {"state": "failed", "progress": 0,
+                                      "shot": 0, "total": 0,
+                                      "backend": "ffmpeg", "output": ""}
+                self._save(project)
+                self._message(project, f"发布失败：{e}", hud="DRAMA RELEASE FAILED")
+            except Exception as e:
+                print(f"[Drama] 发布异常: {e}")
+                project.production = {"state": "failed", "progress": 0,
+                                      "shot": 0, "total": 0,
+                                      "backend": "ffmpeg", "output": ""}
+                self._save(project)
+                self._message(project, "发布失败，请查看日志。")
+            finally:
+                self._end_generation()
+
+        threading.Thread(target=_work, daemon=True).start()
+        return {"status": "publishing",
+                "message": "正在打包发布成片，完成后我会汇报。"}
 
     def _next_episode(self, project, role: str) -> dict:
         if self._busy:

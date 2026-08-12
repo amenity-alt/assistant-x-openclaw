@@ -79,6 +79,9 @@ _PRODUCE_ALL_RE = re.compile(
     r"(?:制作|做|渲染)\s*(?:全部|所有|全部集|所有集)|全部制作|render\s*all|make\s*all", re.I
 )
 _RESUME_RE = re.compile(r"(?:继续短剧|恢复短剧|短剧继续)|resume\s*drama", re.I)
+_PUBLISH_RE = re.compile(
+    r"(?:打包发布|一键发布|发布短剧|发布成片|打包成片|打包|发布|release|publish)", re.I
+)
 
 YES_RE = re.compile(
     r"^(?:确认|好的|可以|嗯|对|同意|行|好|是|确认继续|继续吧|ok|yes|yep|sure|"
@@ -111,7 +114,7 @@ _START_RE = re.compile(
 class DramaIntent:
     cmd: str                       # enter/exit/status/plan/character/episode_view/
                                    # episode_rewrite/prompts/produce/produce_all/next/reclip/
-                                   # pause/resume/stop/yes/no/collect/help
+                                   # pause/resume/stop/publish/yes/no/collect/help
     episode: int = 0
     text: str = ""
     target: str = ""               # 修改人物目标（如 女主角/林晓）
@@ -150,6 +153,8 @@ def parse(text: str) -> DramaIntent:
         return DramaIntent(cmd="resume")
     if _STOP_RE.search(t):
         return DramaIntent(cmd="stop", text=t)
+    if _PUBLISH_RE.search(t):
+        return DramaIntent(cmd="publish", text=t)
 
     m = _EPISODE_REWRITE_RE.search(t)
     if m:
